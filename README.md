@@ -11,6 +11,10 @@ and also XPilot. Originally I actually wrote it for DOS using Turbo C++, but it
 slowly evolved into what you see here. I pulled this code from a backup CD from
 around 2001 and modernised it to build.
 
+![z-pilot gameplay showing the ship, cavern, orb and flight HUD](docs/screenshot.png)
+
+*A frame from the deterministic gameplay capture.*
+
 ## The game
 
 Gravity pulls, the rock does not move, and the only thing you spend is fuel —
@@ -35,8 +39,13 @@ algorithm, not another file.
 
 <kbd>W</kbd>/<kbd>S</kbd> drive and retro, <kbd>A</kbd>/<kbd>D</kbd> turn,
 <kbd>Space</kbd> fires, <kbd>E</kbd> is the tractor beam, <kbd>Q</kbd>
-overcharges the shield and <kbd>F</kbd> slows time. <kbd>R</kbd> restarts the
-planet, <kbd>F1</kbd> shows help.
+overcharges the shield and <kbd>F</kbd> slows time. The arrow keys,
+<kbd>Shift</kbd>, <kbd>Ctrl</kbd> and <kbd>Tab</kbd> do the same jobs (the
+in-game manual shows that set), and the mouse buttons fire and tractor.
+
+<kbd>R</kbd> restarts the planet, <kbd>P</kbd> pauses, <kbd>Esc</kbd> steps
+back towards the star map, <kbd>F1</kbd> shows the manual, <kbd>F3</kbd> mutes,
+<kbd>F11</kbd> toggles fullscreen and <kbd>F12</kbd> saves a screenshot.
 
 ## Building
 
@@ -47,7 +56,7 @@ uses the CMake and Ninja that ship with it.
 ```powershell
 .\dd.ps1 build        # both configurations
 .\dd.ps1 test         # build and run the suite
-.\dd.ps1 run          # build, then launch
+.\dd.ps1 launch       # build Release, then start the game
 ```
 
 ## Documentation

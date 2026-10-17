@@ -22,6 +22,10 @@ struct PlanetRecord {
 
 class Profile {
 public:
+    // Keeps the record in `folder` instead of %APPDATA%\z-pilot. The scripted
+    // capture flies real runs, and they must not land in the player's log.
+    static void UseFolder(const wchar_t* folder);
+
     void Load();
     void Save() const;
 
