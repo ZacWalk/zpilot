@@ -45,8 +45,6 @@ struct Body {
     float gravityScale = 1.0f;
     uint32_t flags = 0;
 
-    int tag = 0;      // game side kind
-    int index = -1;   // game side array slot
     bool alive = false;
     bool asleep = false;
     float sleepTime = 0;
@@ -142,11 +140,9 @@ private:
     std::vector<Joint> joints_;
     std::vector<Contact> contacts_;
     std::vector<int> freeBodies_, freeJoints_;
-    std::vector<int> awake_;
 
     const Field* field_ = nullptr;
     Vec2 gravity_ = {0, -6.0f};
-    int stepCount_ = 0;
 };
 
 }  // namespace zp

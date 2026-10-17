@@ -6,6 +6,11 @@
 
 namespace zp {
 
+// How far the kick pushes the pitched parts down, and how fast it lets go:
+// enough to hear the low end pulse, not enough to hear a compressor pump.
+static const float kDuckDepth = 0.30f;
+static const float kDuckRelease = 0.11f;  // seconds
+
 struct Synth::CallbackImpl : public IXAudio2VoiceCallback {
     HANDLE ev = nullptr;
     void __stdcall OnVoiceProcessingPassStart(UINT32) override {}
@@ -27,6 +32,20 @@ static inline float noiseFrom(uint32_t& s) {
 }
 
 static inline float midiToHz(float n) { return 440.0f * powf(2.0f, (n - 69.0f) / 12.0f); }
+
+// Band limited step residual. A naive saw or pulse folds its upper harmonics
+// back down as inharmonic fizz once a note climbs past a few hundred hertz.
+static inline float polyBlep(float t, float dt) {
+    if (t < dt) {
+        t /= dt;
+        return t + t - t * t - 1.0f;
+    }
+    if (t > 1.0f - dt) {
+        t = (t - 1.0f) / dt;
+        return t * t + t + t + 1.0f;
+    }
+    return 0.0f;
+}
 
 bool Synth::Init() {
     voices_.resize(kMaxVoices);
@@ -257,15 +276,20 @@ void Synth::RenderVoice(Voice& v, float& outL, float& outR, float& outSend) {
 
     float e;
     float ad = v.attack + v.decay;
-    if (v.t < v.attack)
+    if (v.t < v.attack) {
         e = v.attack > 0 ? v.t / v.attack : 1.0f;
-    else if (v.t < ad)
-        e = lerpf(1.0f, v.sustain, (v.t - v.attack) / std::max(v.decay, 1e-5f));
-    else if (v.t < v.dur)
+    } else if (v.t < ad) {
+        float k = 1.0f - (v.t - v.attack) / std::max(v.decay, 1e-5f);
+        if (v.pluck) k *= k;
+        e = v.sustain + (1.0f - v.sustain) * k;
+    } else if (v.t < v.dur) {
         e = v.sustain;
-    else
+    } else {
         e = v.sustain * saturatef(1.0f - (v.t - v.dur) / std::max(v.release, 1e-5f));
-    if (v.t > std::max(v.dur, ad) + v.release) {
+    }
+    // With no sustain the voice is silent from here on. Holding it through an
+    // inaudible release only forces the allocator to cut off one still sounding.
+    if (v.t > std::max(v.dur, ad) + v.release || (v.sustain <= 0.0f && v.t >= ad)) {
         v.active = false;
         return;
     }
@@ -274,6 +298,7 @@ void Synth::RenderVoice(Voice& v, float& outL, float& outR, float& outSend) {
     float freq = v.f0 * powf(std::max(v.f1, 1.0f) / std::max(v.f0, 1.0f), u);
     if (v.vibDepth > 0) freq *= 1.0f + sinf(kTau * v.vibRate * v.t) * v.vibDepth;
 
+    const float dt = clampf(freq / sr, 1e-6f, 0.5f);
     v.phase += freq / sr;
     if (v.phase >= 1.0f) v.phase -= floorf(v.phase);
     v.phase2 += freq * v.fmRatio / sr;
@@ -281,8 +306,13 @@ void Synth::RenderVoice(Voice& v, float& outL, float& outR, float& outSend) {
 
     float o = 0;
     switch (v.wave) {
-        case 0: o = v.phase * 2.0f - 1.0f; break;
-        case 1: o = v.phase < v.pw ? 1.0f : -1.0f; break;
+        case 0: o = v.phase * 2.0f - 1.0f - polyBlep(v.phase, dt); break;
+        case 1: {
+            float fall = v.phase - v.pw;
+            if (fall < 0.0f) fall += 1.0f;
+            o = (v.phase < v.pw ? 1.0f : -1.0f) + polyBlep(v.phase, dt) - polyBlep(fall, dt);
+            break;
+        }
         case 2: o = 4.0f * fabsf(v.phase - 0.5f) - 1.0f; break;
         case 3: o = noiseFrom(v.rngState); break;
         case 4: o = sinf(kTau * v.phase); break;
@@ -311,21 +341,39 @@ void Synth::RenderVoice(Voice& v, float& outL, float& outR, float& outSend) {
 namespace {
 
 // Chords are a bass root plus a four note voicing. A natural minor palette with
-// enough colour tones that the arpeggio has somewhere to go.
+// enough colour tones that the arpeggio has somewhere to go. `deg` is the root's
+// place in the key, in scale steps from the tonic, so a motif can be moved onto
+// the chord without ever leaving the key.
 struct Chord {
     int8_t root;
+    int8_t deg;
     int8_t iv[4];
 };
 static const Chord kChords[8] = {
-    {45, {0, 3, 7, 12}},  // 0  i        A minor
-    {41, {0, 4, 7, 11}},  // 1  VI maj7  F
-    {48, {0, 4, 7, 10}},  // 2  III7     C
-    {43, {0, 4, 7, 12}},  // 3  VII      G
-    {50, {0, 3, 7, 10}},  // 4  iv7      D minor
-    {40, {0, 5, 7, 12}},  // 5  Vsus     E sus4
-    {47, {0, 3, 6, 10}},  // 6  ii-      B half diminished
-    {45, {0, 3, 7, 14}},  // 7  i add9
+    {45, 0, {0, 3, 7, 12}},   // 0  i        A minor
+    {41, -2, {0, 4, 7, 11}},  // 1  VI maj7  F
+    {48, 2, {0, 4, 7, 10}},   // 2  III7     C
+    {43, -1, {0, 4, 7, 12}},  // 3  VII      G
+    {50, 3, {0, 3, 7, 10}},   // 4  iv7      D minor
+    {40, -3, {0, 5, 7, 12}},  // 5  Vsus     E sus4
+    {47, 1, {0, 3, 6, 10}},   // 6  ii-      B half diminished
+    {45, 0, {0, 3, 7, 14}},   // 7  i add9
 };
+
+const int kTonic = 45;  // A, the key every chord root above sits in
+const int kScale[7] = {0, 2, 3, 5, 7, 8, 10};
+const int kRest = -99;
+
+int ScaleSemitones(int step) {
+    int octave = step >= 0 ? step / 7 : -((6 - step) / 7);
+    return octave * 12 + kScale[step - octave * 7];
+}
+
+bool ChordTone(const Chord& ch, int root, int note) {
+    for (int iv : ch.iv)
+        if ((((note - root - iv) % 12) + 12) % 12 == 0) return true;
+    return false;
+}
 
 // One tracker row per bar. Sixteen bars of order list, and the textures change
 // underneath the harmony, so the ear hears a tune rather than a two bar loop.
@@ -384,14 +432,28 @@ void Synth::StepSequencer() {
     if (seed != lastSeed_) {
         lastSeed_ = seed;
         // Two motifs per planet. Regenerated only when the planet changes, so
-        // the tune stays the tune while the arrangement moves around it.
+        // the tune stays the tune while the arrangement moves around it. Each is
+        // a walk that mostly moves by step with the odd leap, which is what
+        // makes a line sound sung rather than rolled.
         Rng r(seed * 2654435761u + 7u);
-        static const int scale[7] = {0, 2, 3, 5, 7, 8, 10};
-        for (int i = 0; i < kMotifLen; ++i) {
-            motifA_[i] = r.f01() < 0.30f ? -1 : scale[r.rangeI(0, 6)] + (r.f01() < 0.18f ? 12 : 0);
-            motifB_[i] = r.f01() < 0.42f ? -1 : scale[r.rangeI(0, 6)];
-        }
-        motifA_[0] = 0;
+        auto walk = [&](int* motif, float rests, int lo, int hi) {
+            int at = 0;
+            motif[0] = 0;
+            for (int i = 1; i < kMotifLen; ++i) {
+                if (r.f01() < rests) {
+                    motif[i] = kRest;
+                    continue;
+                }
+                float u = r.f01();
+                int move = u < 0.14f ? 0 : u < 0.64f ? 1 : u < 0.88f ? 2 : r.rangeI(3, 4);
+                // Leaning back toward the tonic keeps the line in one register.
+                bool down = r.f01() < 0.5f + 0.07f * (float)at;
+                at = std::max(lo, std::min(hi, at + (down ? -move : move)));
+                motif[i] = at;
+            }
+        };
+        walk(motifA_, 0.30f, -3, 7);
+        walk(motifB_, 0.42f, -5, 4);
         songTranspose_ = (int)(seed % 5u) - 2;
     }
 
@@ -413,11 +475,13 @@ void Synth::StepSequencer() {
     const Chord& ch = kChords[row.chord];
     const int shift = songTranspose_ + (intensity >= 3 ? 6 : 0);  // meltdown: tritone, all wrong
     const int root = ch.root + shift;
+    const int tonic = kTonic + shift;
 
+    // Every pitched part rides the music bus, so the kick can push it aside.
     auto note = [&](int wave, float midi, float gain, float dur, float pw, float pan, float cut0,
-                    float cut1, float send) {
+                    float cut1, float send) -> Voice* {
         Voice* v = Alloc();
-        if (!v) return;
+        if (!v) return nullptr;
         v->active = true;
         v->wave = wave;
         v->f0 = v->f1 = midiToHz(midi);
@@ -433,9 +497,24 @@ void Synth::StepSequencer() {
         v->res = 0.25f;
         v->pan = pan;
         v->send = send;
+        v->duck = true;
+        return v;
     };
 
-    auto perc = [&](float decay, float cut0, float cut1, float res, float gain, float pan,
+    // The motif is in scale steps, so moving it onto the chord is a shift in
+    // the key and the line never leaves it. Strong beats land on a chord tone,
+    // and a note a semitone above one - the clash the ear hears as a wrong
+    // note - resolves down onto it.
+    auto melody = [&](int step, bool strong) {
+        int m = tonic + 24 + ScaleSemitones(step + ch.deg);
+        if (strong) {
+            for (int d : {0, -1, 1, -2, 2, -3, 3})
+                if (ChordTone(ch, root, m + d)) return m + d;
+        }
+        return !ChordTone(ch, root, m) && ChordTone(ch, root, m - 1) ? m - 1 : m;
+    };
+
+    auto perc =  [&](float decay, float cut0, float cut1, float res, float gain, float pan,
                     float send) {
         Voice* v = Alloc();
         if (!v) return;
@@ -467,10 +546,13 @@ void Synth::StepSequencer() {
     }
 
     // Bass: root on the downbeats, fifth and octave off them, so the line walks.
+    // The fifth is the chord's own: a perfect one fights the half diminished.
     if (kBassPat[row.bass][s]) {
-        int off = (s == 0 || s == 8) ? 0 : (s >= 12 ? 7 : ((s & 3) == 2 ? 12 : 0));
-        note(0, (float)(root + off - 12), 0.20f, (s % 4) == 0 ? 0.20f : 0.13f, 0.5f, 0.5f, 0.44f,
-             0.12f, 0.12f);
+        int off = (s == 0 || s == 8) ? 0 : (s >= 12 ? ch.iv[2] : ((s & 3) == 2 ? 12 : 0));
+        float accent = (s % 4) == 0 ? 1.0f : 0.86f;
+        if (Voice* v = note(0, (float)(root + off - 12), 0.20f * accent,
+                            (s % 4) == 0 ? 0.20f : 0.13f, 0.5f, 0.5f, 0.44f, 0.12f, 0.12f))
+            v->pluck = true;
     }
 
     // Arpeggio: eighths, sixteenths or a broken figure with octave jumps.
@@ -480,21 +562,31 @@ void Synth::StepSequencer() {
             int seq = step_ / (row.arp == 1 ? 2 : 1);
             int idx = (bar & 2) ? 3 - (seq & 3) : (seq & 3);  // the figure inverts every 2 bars
             int oct = (row.arp == 3 && (seq & 4)) ? 12 : 0;
-            note(1, (float)(root + ch.iv[idx] + 24 + oct), intensity >= 2 ? 0.070f : 0.052f, 0.12f,
-                 0.30f, (s & 1) ? 0.74f : 0.26f, 0.95f, 0.55f, 0.55f);
+            float accent = (s % 4) == 0 ? 1.18f : 0.92f;
+            if (Voice* v = note(1, (float)(root + ch.iv[idx] + 24 + oct),
+                                (intensity >= 2 ? 0.070f : 0.052f) * accent, 0.12f, 0.30f,
+                                (s & 1) ? 0.74f : 0.26f, 0.95f, 0.55f, 0.55f))
+                v->pluck = true;
         }
     }
 
-    // Lead: the planet's motif, transposed onto whatever chord is underneath.
+    // Lead: the planet's motif, carried through the key onto whatever chord is
+    // underneath. The busiest rows double it an octave up over a chord tone.
     if (row.lead && (s % 2) == 0) {
         const int* motif = row.lead == 2 ? motifB_ : motifA_;
-        int n = motif[(step_ / 2) % kMotifLen];
-        if (n >= 0) {
-            float m = (float)(root + n + 24 + (row.lead == 3 ? 12 : 0));
-            note(1, m, 0.070f, 0.28f, 0.18f, 0.5f, 1.0f, 0.45f, 0.78f);
-            if (row.lead == 3) note(2, m - 5.0f, 0.038f, 0.24f, 0.5f, 0.34f, 0.9f, 0.40f, 0.80f);
+        int step = motif[(step_ / 2) % kMotifLen];
+        if (step != kRest) {
+            const bool strong = (s % 4) == 0;
+            int m = melody(step + (row.lead == 3 ? 7 : 0), strong);
+            float accent = (s % 8) == 0 ? 1.12f : (strong ? 1.0f : 0.9f);
+            note(1, (float)m, 0.070f * accent, 0.28f, 0.18f, 0.5f, 1.0f, 0.45f, 0.78f);
+            if (row.lead == 3) {
+                int h = m - 3;
+                while (!ChordTone(ch, root, h)) --h;
+                note(2, (float)h, 0.038f, 0.24f, 0.5f, 0.34f, 0.9f, 0.40f, 0.80f);
+            }
             if (musicRng_.f01() < 0.10f)
-                note(1, m + 12.0f, 0.028f, 0.06f, 0.20f, 0.66f, 1.0f, 0.70f, 0.60f);
+                note(1, (float)(m + 12), 0.028f, 0.06f, 0.20f, 0.66f, 1.0f, 0.70f, 0.60f);
         }
     } else if (!row.lead && s == 0) {
         // No melody this bar: hold a pad so the gap is a rest, not a hole.
@@ -512,6 +604,7 @@ void Synth::StepSequencer() {
             v->attack = 0.001f; v->decay = 0.22f; v->dur = 0.22f; v->release = 0.05f;
             v->cut0 = 0.6f; v->cut1 = 0.3f; v->gain = 0.34f; v->send = 0.05f;
         }
+        duck_ = 1.0f;
     }
     if (kSnarePat[row.drum][s]) perc(0.16f, 0.72f, 0.35f, 0.30f, 0.17f, 0.5f, 0.45f);
     if (kHatPat[row.drum][s])
@@ -560,6 +653,7 @@ void Synth::RenderBlock(float* out, int frames) {
     const float thrustTarget = thrust_.load();
     const float tractorTarget = tractor_.load();
     const float tensionAmt = tension_.load();
+    const float duckFall = expf(-1.0f / (kDuckRelease * sr));
 
     for (int i = 0; i < frames; ++i) {
         stepAccum_ += 1.0;
@@ -568,9 +662,21 @@ void Synth::RenderBlock(float* out, int frames) {
             StepSequencer();
         }
 
-        float l = 0, r = 0, send = 0;
-        for (auto& v : voices_)
-            if (v.active) RenderVoice(v, l, r, send);
+        float l = 0, r = 0, send = 0, ml = 0, mr = 0, msend = 0;
+        for (auto& v : voices_) {
+            if (!v.active) continue;
+            if (v.duck)
+                RenderVoice(v, ml, mr, msend);
+            else
+                RenderVoice(v, l, r, send);
+        }
+        // The kick ducks the pitched parts for a beat, so the low end reads as
+        // a pulse instead of a smear. Smoothed, or the drop itself would click.
+        duck_ *= duckFall;
+        duckGain_ += (1.0f - kDuckDepth * duck_ - duckGain_) * 0.02f;
+        l += ml * duckGain_;
+        r += mr * duckGain_;
+        send += msend * duckGain_;
 
         // Continuous engine roar: filtered noise + a sub rumble.
         thrustLevel_ += (thrustTarget - thrustLevel_) * 0.0016f;
@@ -627,8 +733,6 @@ void Synth::RenderBlock(float* out, int frames) {
         out[i * 2 + 0] = l;
         out[i * 2 + 1] = r;
     }
-
-    sampleClock_ += frames;
 }
 
 }  // namespace zp

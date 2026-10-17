@@ -58,6 +58,8 @@ private:
         float vibRate = 0, vibDepth = 0;
         float fmRatio = 2.0f, fmDepth = 0.0f;
         float pan = 0.5f, send = 0.25f;
+        bool pluck = false;  // decays on a curve: front-loaded, like a plucked string
+        bool duck = false;   // on the music bus, so the kick can push it aside
         uint32_t rngState = 1;
     };
 
@@ -109,18 +111,19 @@ private:
 
     std::vector<float> delayL_, delayR_;
     int delayPos_ = 0;
+    float duck_ = 0, duckGain_ = 1;
 
     double stepAccum_ = 0;
     int step_ = 0;
     uint32_t lastSeed_ = 0;
     // 23 is coprime with the 16 step bar, so the melody walks around the beat
-    // and only lines up again 23 bars later.
+    // and only lines up again 23 bars later. Entries are steps of the minor
+    // scale above the tonic, so the line can be moved onto any chord in key.
     static const int kMotifLen = 23;
     int motifA_[kMotifLen] = {};
     int motifB_[kMotifLen] = {};
     int songTranspose_ = 0;
     Rng musicRng_{1};
-    double sampleClock_ = 0;
 };
 
 }  // namespace zp
