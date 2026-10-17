@@ -12,10 +12,28 @@ struct Beat {
     Key key;
     bool down;
 };
+// A key typed for real: sent down and up straight to the window procedure after
+// the frame's pump, so both land between two frames - the quick tap a held
+// SetKey never exercises - and no focus change can slip in between them.
+struct Tap {
+    int frame;
+    WPARAM vk;
+};
+// A lit frame is not proof the script did what the name says - a swallowed key
+// leaves the game on the screen before - so every shot also names its mode, and
+// the later ones the planet the taps should have chosen.
 struct Shot {
     int frame;
     const wchar_t* name;
+    Mode mode;
+    int planet = -1;  // any
 };
+
+// The capture's exit code is this plus the index of the first shot that caught
+// a different mode or planet; tests/capture.ps1 turns it back into the shot's name.
+constexpr int kWrongShotExit = 100;
+
+constexpr int kDeepPlanet = 3;  // three taps right of the first
 
 const Beat kScript[] = {
     {80, KEY_START, true},    {82, KEY_START, false},    // title -> star map
@@ -25,12 +43,9 @@ const Beat kScript[] = {
     {800, KEY_SHIELD, true},  {840, KEY_SHIELD, false},  // overcharge the field
     {860, KEY_HELP, true},    {862, KEY_HELP, false},
     {900, KEY_HELP, true},    {902, KEY_HELP, false},
-    // Second act: back out to the star map and fly something deeper.
+    // Second act: back out to the star map and fly something deeper (kTaps).
     {920, KEY_QUIT, true},    {922, KEY_QUIT, false},    // pause
     {930, KEY_QUIT, true},    {932, KEY_QUIT, false},    // -> star map
-    {1000, KEY_RIGHT, true},  {1002, KEY_RIGHT, false},
-    {1012, KEY_RIGHT, true},  {1014, KEY_RIGHT, false},
-    {1024, KEY_RIGHT, true},  {1026, KEY_RIGHT, false},
     {1040, KEY_START, true},  {1042, KEY_START, false},  // launch it
     {1100, KEY_START, true},  {1102, KEY_START, false},  // skip the briefing
     // Third act: back to the star map, relaunch, and climb straight out. That
@@ -40,18 +55,30 @@ const Beat kScript[] = {
     {1320, KEY_QUIT, true},   {1322, KEY_QUIT, false},   // -> star map
     {1360, KEY_START, true},  {1362, KEY_START, false},  // relaunch
     {1420, KEY_START, true},  {1422, KEY_START, false},  // skip the briefing
-    {1640, KEY_START, true},  {1642, KEY_START, false},  // results -> star map
+    // The ship clears the exit line near frame 1617, and the results screen
+    // ignores keys for its first half second, so this is the earliest press
+    // that lands with room to spare.
+    {1665, KEY_START, true},  {1667, KEY_START, false},  // results -> star map
 };
 
+const Tap kTaps[] = {{1000, VK_RIGHT}, {1012, VK_RIGHT}, {1024, VK_RIGHT}};
+
 const Shot kShots[] = {
-    {70, L"shots/01_title.png"},     {140, L"shots/02_starmap.png"},
-    {215, L"shots/03_briefing.png"}, {300, L"shots/04_descent.png"},
-    {430, L"shots/05_shaft.png"},    {560, L"shots/06_props.png"},
-    {680, L"shots/07_deep.png"},     {760, L"shots/08_tractor.png"},
-    {830, L"shots/09_field.png"},    {880, L"shots/10_help.png"},
-    {990, L"shots/11_starmap2.png"}, {1090, L"shots/12_briefing2.png"},
-    {1280, L"shots/13_hazards.png"}, {1620, L"shots/14_results.png"},
-    {1670, L"shots/15_starmap3.png"},
+    {70, L"shots/01_title.png", Mode::Title},
+    {140, L"shots/02_starmap.png", Mode::Grid},
+    {215, L"shots/03_briefing.png", Mode::Briefing},
+    {300, L"shots/04_descent.png", Mode::Playing},
+    {430, L"shots/05_shaft.png", Mode::Playing},
+    {560, L"shots/06_props.png", Mode::Playing},
+    {680, L"shots/07_deep.png", Mode::Playing},
+    {760, L"shots/08_tractor.png", Mode::Playing},
+    {830, L"shots/09_field.png", Mode::Playing},
+    {880, L"shots/10_help.png", Mode::Playing},
+    {990, L"shots/11_starmap2.png", Mode::Grid},
+    {1090, L"shots/12_briefing2.png", Mode::Briefing, kDeepPlanet},
+    {1280, L"shots/13_hazards.png", Mode::Playing, kDeepPlanet},
+    {1640, L"shots/14_results.png", Mode::Results, kDeepPlanet},
+    {1695, L"shots/15_starmap3.png", Mode::Grid, kDeepPlanet},
 };
 
 bool HasFlag(const wchar_t* flag) {
@@ -63,6 +90,15 @@ bool HasFlag(const wchar_t* flag) {
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    // The capture's runs go in a save file of their own, started empty, so they
+    // never reach the player's log and the star map frames never depend on it.
+    const bool capture = HasFlag(L"-capture");
+    if (capture) {
+        CreateDirectoryW(L"shots", nullptr);
+        DeleteFileW(L"shots\\profile.dat");
+        Profile::UseFolder(L"shots");
+    }
 
     Window window;
     if (!window.Create(L"z-pilot", 1600, 900)) return 1;
@@ -81,12 +117,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     Game game;
     game.Init(&renderer, &synth, &window);
 
-    if (HasFlag(L"-capture")) {
-        CreateDirectoryW(L"shots", nullptr);
+    if (capture) {
         synth.SetMuted(true);
+        int wrongShot = -1;
         for (int frame = 0; frame <= 1700; ++frame) {
             window.NewFrame();
             window.PumpMessages();
+            for (const Tap& t : kTaps) {
+                if (t.frame != frame) continue;
+                SendMessageW(window.Handle(), WM_KEYDOWN, t.vk, 1);
+                SendMessageW(window.Handle(), WM_KEYUP, t.vk, 0xC0000001);
+            }
             for (const Beat& b : kScript)
                 if (b.frame == frame) window.SetKey(b.key, b.down);
             if (frame > 235 && frame < 915) {
@@ -118,15 +159,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             // drive is a reliable way to leave without the orb.
             if (frame >= 1430) window.SetKey(KEY_UP, true);
             game.Frame(1.0f / 60.0f);
-            for (const Shot& s : kShots)
-                if (s.frame == frame) renderer.SaveScreenshot(s.name);
+            for (int i = 0; i < (int)_countof(kShots); ++i) {
+                const Shot& s = kShots[i];
+                if (s.frame != frame) continue;
+                renderer.SaveScreenshot(s.name);
+                const bool wrong = game.CurrentMode() != s.mode ||
+                                   (s.planet >= 0 && game.CurrentPlanet() != s.planet);
+                if (wrongShot < 0 && wrong) wrongShot = i;
+            }
             renderer.Present(false);
         }
         synth.Shutdown();
         renderer.Shutdown();
         window.Destroy();
         CoUninitialize();
-        return 0;
+        return wrongShot < 0 ? 0 : kWrongShotExit + wrongShot;
     }
 
     LARGE_INTEGER freq, prev;

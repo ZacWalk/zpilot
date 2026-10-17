@@ -10,33 +10,58 @@ wrong unless the human explicitly says the model has moved.
 ## Build and verify
 
 ```powershell
-.\dd.ps1 build          # configure + build both configs
-.\dd.ps1 run            # build, then launch
-.\dd.ps1 test           # build, run the scripted capture, verify 15 frames
-.\dd.ps1 clean
+.\dd.ps1 build                  # configure + build both configs
+.\dd.ps1 launch                 # build Release, then start the game
+.\dd.ps1 test --label z-pilot   # build both, run the scripted capture, verify the frames
+.\dd.ps1 clean --dry-run
 ```
 
-`-Config Debug` for a debug build. The script sets up the MSVC environment
-itself; do not try to source `vcvars` by hand.
+`.\dd.ps1 build debug` or `release` builds one configuration. dd sets up the
+MSVC environment itself; do not try to source `vcvars` by hand.
 
-**`.\dd.ps1 test` is the gate.** It runs `z-pilot.exe -capture`, a deterministic
-1700-frame fly-through defined by `kScript` and `kShots` in
-[src/Main.cpp](src/Main.cpp), then checks every PNG is non-blank. It takes about
-eleven seconds. Run it after every change.
+The repository carries an unmodified [dd](https://github.com/ZacWalk/dd)
+checkout as `dd.ps1` plus `.dd/`; [docs/dd-upstream.json](docs/dd-upstream.json)
+records the vendored hashes. Keep z-pilot's dd configuration in `dd.psd1`, keep
+CMake dependency pins in `cmake/dd-dependencies.json`, and use
+`.\dd.ps1 commands --json` when you need the project-command list. dd's own
+documentation covers its [CLI/MCP modes](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
+and [built-in commands](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands).
+
+**`.\dd.ps1 test --label z-pilot` is the gate.** It runs `z-pilot.exe -capture`,
+a deterministic 1700-frame fly-through defined by `kScript` and `kShots` in
+[src/Main.cpp](src/Main.cpp), then [tests/capture.ps1](tests/capture.ps1) checks
+every PNG is non-blank and was taken on the screen (`Mode`) its `kShots` entry
+names. The capture opens the game's window and takes about half a minute per
+configuration — two to four minutes on a CI runner, which has no GPU and renders
+in software, so the check allows ten before calling the run hung. Run it after
+every change.
 
 The capture is in three acts. The third one exists because it is the only way
 the results screen, `Grade`, `Profile::Submit` and the save file are ever
 executed: it relaunches a planet and holds the drive so the ship leaves without
-the orb, which ends the run. Do not delete it to save four seconds.
+the orb, which ends the run. Do not delete it to save four seconds. The capture
+keeps that save file in `shots/`, started empty each run
+(`Profile::UseFolder`); the check fails if it is missing or if the player's
+`%APPDATA%\z-pilot\profile.dat` changed.
 
-Two traps:
+Three traps:
 
-- The **shot names are duplicated** in `src/Main.cpp` and in the `$expected`
-  array in `dd.ps1`. Change them together or the check fails on a missing file.
-- The capture is the only automated coverage there is. A frame going blank or
-  the run hanging is a real regression, not a flaky test.
+- The frame check reads its shot list from `kShots`, so adding or renaming a
+  shot needs no second edit — but a shot whose frame the script never reaches
+  fails the check as missing.
+- A key the script presses is ignored if the screen is not ready for it (the
+  results screen takes none for its first half second), and the game then sits
+  on the wrong screen with every frame still lit. That is what the `Mode` (and,
+  after the second act's taps, the planet) on each shot catches: the capture
+  exits with 100 plus the shot's index. The second act's star-map moves are
+  `kTaps`, real key messages that go down and up inside one frame, so they also
+  cover `Window`'s latch for taps shorter than a frame.
+- The capture is the only automated coverage there is. A frame going blank, a
+  shot on the wrong screen or the run hanging is a real regression, not a flaky
+  test.
 
-Build output lands in `build/Release`, screenshots in `build/Release/shots`.
+Build output lands in `build/release` and `build/debug`, screenshots in the
+`shots` folder under each.
 
 ---
 
@@ -60,7 +85,7 @@ flat or repetitive, write a better algorithm, do not add a file.
 | `Renderer.*` / `Shaders.h` | HDR scene, additive effects, bloom, CRT composite. |
 | `Font.*` | Stroke font, screen space and world space. |
 | `Synth.*` | Procedural audio. |
-| `Profile.*` | Save file in `%APPDATA%\z-pilot\profile.dat`. |
+| `Profile.*` | Save file in `%APPDATA%\z-pilot\profile.dat` (the capture keeps its own in `shots/`). |
 | `Game.*` | Everything else: modes, flight, props, HUD, star map. |
 
 Dependencies run one way: `Game` → everything, `Geometry` → `Field`,
@@ -140,7 +165,7 @@ anything that depends on frame rate, in either path.
 
 Before saying you are done:
 
-1. `.\dd.ps1 test` passes.
+1. `.\dd.ps1 test --label z-pilot` passes.
 2. Nothing you added is set but never read. This codebase has accumulated
    dead fields more than once — check.
 3. Player-facing names are consistent. The factory is not sometimes a reactor;
@@ -148,25 +173,3 @@ Before saying you are done:
 4. If you touched anything visual, re-read the invariants in `docs/design.md`.
 5. If you could not see the result, **say so**. Frame mean/peak from the capture
    tells you a frame is not blank; it does not tell you it looks right.
-
-## dd build system
-
-This repo uses the vendored dd build system. dd has two modes.
-
-**CLI mode** is the default; each verb runs once and exits:
-
-```pwsh
-.\dd.ps1 test                  # build both configs and run the suite
-.\dd.ps1 build debug
-.\dd.ps1 doctor --json
-.\dd.ps1 commands --json       # list this project's own commands
-```
-
-**MCP mode** — `.\dd.ps1 mcp` turns the process into a stdio JSON-RPC server for an
-MCP client, adapting typed requests onto CLI mode. It owns stdout for protocol
-messages, so it prints no result envelope and rejects `--json`. Register it with
-`.\dd.ps1 ide --mcp`.
-
-Project settings live in `dd.psd1`; dependency pins live in
-`cmake/dd-dependencies.json` with `dependencies.owner = 'dd'`. Vendored dd file
-hashes are recorded in `docs/dd-upstream.json`.

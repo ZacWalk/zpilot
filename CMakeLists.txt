@@ -41,4 +41,9 @@ if(BUILD_TESTING)
     add_executable(z_pilot_tests tests/smoke.cpp)
     add_test(NAME z_pilot_unit COMMAND z_pilot_tests)
     set_tests_properties(z_pilot_unit PROPERTIES TIMEOUT 30 LABELS z-pilot)
+
+    add_test(NAME z_pilot_capture
+        COMMAND pwsh -NoProfile -File "${PROJECT_SOURCE_DIR}/tests/capture.ps1"
+            -Exe "$<TARGET_FILE:z-pilot>" -WorkDir "${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(z_pilot_capture PROPERTIES TIMEOUT 660 LABELS z-pilot)
 endif()

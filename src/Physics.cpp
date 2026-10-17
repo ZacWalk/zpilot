@@ -101,8 +101,6 @@ void World::Reset(const Field* field, Vec2 gravity) {
     contacts_.clear();
     freeBodies_.clear();
     freeJoints_.clear();
-    awake_.clear();
-    stepCount_ = 0;
 }
 
 int World::AddBody(Body b, float density) {
@@ -722,7 +720,6 @@ void World::ReportImpacts() {
 }
 
 void World::Step(float dt) {
-    ++stepCount_;
     for (auto& j : joints_) {
         j.accum = {0, 0};
         j.accumScalar = 0;
