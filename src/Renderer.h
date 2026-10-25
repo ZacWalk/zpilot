@@ -1,4 +1,4 @@
-// z-pilot - Direct3D 11 renderer: HDR scene buffer, additive effect batches,
+// zpilot - Direct3D 11 renderer: HDR scene buffer, additive effect batches,
 // three level bloom chain and a shockwave/CRT composite pass.
 #pragma once
 #include <d3d11.h>

@@ -1,4 +1,4 @@
-// z-pilot - shared math, RNG and noise primitives.
+// zpilot - shared math, RNG and noise primitives.
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN

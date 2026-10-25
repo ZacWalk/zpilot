@@ -1,4 +1,4 @@
-// z-pilot - every visible object is generated here. No models, no sprites.
+// zpilot - every visible object is generated here. No models, no sprites.
 #pragma once
 #include "Field.h"
 #include "Renderer.h"

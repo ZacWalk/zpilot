@@ -37,7 +37,7 @@ const char* MedalName(int m) {
         case 3: return "GOLD";
         case 2: return "SILVER";
         case 1: return "BRONZE";
-        default: return "UNFLOWN";
+        default: return "NO MEDAL";  // only ever shown for a planet already flown
     }
 }
 

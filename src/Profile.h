@@ -1,4 +1,4 @@
-// z-pilot - persistent pilot record: one row per planet, written atomically so
+// zpilot - persistent pilot record: one row per planet, written atomically so
 // a crash mid-save cannot cost the player their progress.
 #pragma once
 #include "Common.h"
@@ -22,6 +22,10 @@ struct PlanetRecord {
 
 class Profile {
 public:
+    // Keeps the record in `folder` instead of %APPDATA%\zpilot. The scripted
+    // capture flies real runs, and they must not land in the player's log.
+    static void UseFolder(const wchar_t* folder);
+
     void Load();
     void Save() const;
 

@@ -36,7 +36,7 @@ static ComPtr<ID3DBlob> CompileShader(const char* prefix, const char* src, const
         // failed Init is enough to make the harness report it.
         const wchar_t* cmd = GetCommandLineW();
         if (!cmd || !wcsstr(cmd, L"-capture"))
-            MessageBoxA(nullptr, msg.c_str(), "z-pilot", MB_OK | MB_ICONERROR);
+            MessageBoxA(nullptr, msg.c_str(), "zpilot", MB_OK | MB_ICONERROR);
         return nullptr;
     }
     return code;

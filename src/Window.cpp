@@ -107,6 +107,7 @@ bool Window::SizeChanged() {
 
 void Window::NewFrame() {
     memcpy(prevDown_, down_, sizeof(down_));
+    memset(tapped_, 0, sizeof(tapped_));
 }
 
 void Window::ToggleFullscreen() {
@@ -131,26 +132,36 @@ void Window::ToggleFullscreen() {
     }
 }
 
-void Window::SetVirtualKey(WPARAM vk, bool down) {
+// Edges are read once a frame, so a key that goes down and back up inside one
+// frame is never seen by down_ alone; `fresh` (not an auto-repeat) latches it.
+void Window::SetVirtualKey(WPARAM vk, bool down, bool fresh) {
+    Key k;
     switch (vk) {
-        case VK_LEFT: case 'A': down_[KEY_LEFT] = down; break;
-        case VK_RIGHT: case 'D': down_[KEY_RIGHT] = down; break;
-        case VK_UP: case 'W': down_[KEY_UP] = down; break;
-        case VK_DOWN: case 'S': down_[KEY_DOWN] = down; break;
-        case VK_SPACE: down_[KEY_FIRE] = down; break;
-        case VK_SHIFT: case 'E': down_[KEY_TRACTOR] = down; break;
-        case VK_CONTROL: case 'Q': down_[KEY_SHIELD] = down; break;
-        case VK_TAB: case 'F': down_[KEY_SLOW] = down; break;
-        case VK_RETURN: down_[KEY_START] = down; break;
-        case 'P': down_[KEY_PAUSE] = down; break;
-        case 'R': down_[KEY_RESTART] = down; break;
-        case VK_ESCAPE: down_[KEY_QUIT] = down; break;
-        case VK_F1: down_[KEY_HELP] = down; break;
-        case VK_F3: down_[KEY_MUTE] = down; break;
-        case VK_F11: down_[KEY_FULLSCREEN] = down; break;
-        case VK_F12: down_[KEY_SHOT] = down; break;
-        default: break;
+        case VK_LEFT: case 'A': k = KEY_LEFT; break;
+        case VK_RIGHT: case 'D': k = KEY_RIGHT; break;
+        case VK_UP: case 'W': k = KEY_UP; break;
+        case VK_DOWN: case 'S': k = KEY_DOWN; break;
+        case VK_SPACE: k = KEY_FIRE; break;
+        case VK_SHIFT: case 'E': k = KEY_TRACTOR; break;
+        case VK_CONTROL: case 'Q': k = KEY_SHIELD; break;
+        case VK_TAB: case 'F': k = KEY_SLOW; break;
+        case VK_RETURN: k = KEY_START; break;
+        case 'P': k = KEY_PAUSE; break;
+        case 'R': k = KEY_RESTART; break;
+        case VK_ESCAPE: k = KEY_QUIT; break;
+        case VK_F1: k = KEY_HELP; break;
+        case VK_F3: k = KEY_MUTE; break;
+        case VK_F11: k = KEY_FULLSCREEN; break;
+        case VK_F12: k = KEY_SHOT; break;
+        default: return;
     }
+    down_[k] = down;
+    if (down && fresh) tapped_[k] = true;
+}
+
+void Window::SetButton(Key k, bool down) {
+    down_[k] = down;
+    if (down) tapped_[k] = true;
 }
 
 LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -179,19 +190,23 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN:
-                self->SetVirtualKey(wp, true);
+                self->SetVirtualKey(wp, true, (lp & (1 << 30)) == 0);
+                // Alt+F4 has to reach DefWindowProc to become a close; every
+                // other Alt chord stays the game's.
+                if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;
                 return 0;
             case WM_KEYUP:
             case WM_SYSKEYUP:
-                self->SetVirtualKey(wp, false);
+                self->SetVirtualKey(wp, false, false);
                 return 0;
             case WM_KILLFOCUS:
                 memset(self->down_, 0, sizeof(self->down_));
+                memset(self->tapped_, 0, sizeof(self->tapped_));
                 return 0;
-            case WM_LBUTTONDOWN: self->down_[KEY_FIRE] = true; return 0;
-            case WM_LBUTTONUP: self->down_[KEY_FIRE] = false; return 0;
-            case WM_RBUTTONDOWN: self->down_[KEY_TRACTOR] = true; return 0;
-            case WM_RBUTTONUP: self->down_[KEY_TRACTOR] = false; return 0;
+            case WM_LBUTTONDOWN: self->SetButton(KEY_FIRE, true); return 0;
+            case WM_LBUTTONUP: self->SetButton(KEY_FIRE, false); return 0;
+            case WM_RBUTTONDOWN: self->SetButton(KEY_TRACTOR, true); return 0;
+            case WM_RBUTTONUP: self->SetButton(KEY_TRACTOR, false); return 0;
             default: break;
         }
     }

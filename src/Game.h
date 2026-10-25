@@ -1,4 +1,4 @@
-// z-pilot - gameplay: flight model, rigid body props, turrets, scoring rubric,
+// zpilot - gameplay: flight model, rigid body props, turrets, scoring rubric,
 // particle systems, planet select and HUD.
 #pragma once
 #include "Field.h"
@@ -144,6 +144,8 @@ public:
     bool Init(Renderer* r, Synth* s, Window* w);
     void Frame(float dt);
     bool WantsQuit() const { return quit_; }
+    Mode CurrentMode() const { return mode_; }  // the scripted capture checks its shots against these
+    int CurrentPlanet() const { return spec_.index; }
 
 private:
     void StartPlanet(int index);
@@ -188,7 +190,6 @@ private:
     int LiveScore() const;
 
     Vec2 WellAccel(Vec2 p) const;
-    Vec2 GravityAt(Vec2 p) const;
     void Blast(Vec2 at, float radius, float damage, Vec3 col);
     void DetonateMine(Mine& m);
     void KillWell(Well& w);
@@ -239,7 +240,7 @@ private:
     int podBody_ = -1;
     std::vector<int> ropeLinks_;
     std::vector<int> ropeJoints_;
-    Vec2 podPos_, podVel_;
+    Vec2 podPos_;
     bool podAttached_ = false, podDelivered_ = false;
     float podSpin_ = 0;
     float tetherTension_ = 0;
@@ -292,8 +293,10 @@ private:
     bool metMine_ = false, metDrone_ = false, metWell_ = false, metRepulsor_ = false;
     float wellBoost_ = 1.0f;
     Rng rng_{99991};
+    // The shake draws once per rendered frame. On rng_ that would make turret
+    // timing and fuses depend on the frame rate.
+    Rng shakeRng_{4241};
     float accum_ = 0;
-    float hudPulse_ = 0;
 };
 
 }  // namespace zp

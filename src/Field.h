@@ -1,4 +1,4 @@
-// z-pilot - procedural planet: a signed field (positive = rock) carved to an
+// zpilot - procedural planet: a signed field (positive = rock) carved to an
 // archetype, plus the blueprint of everything that hangs, floats or is bolted
 // inside it. One planet index maps to exactly one cavern, forever.
 #pragma once

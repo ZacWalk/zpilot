@@ -1,4 +1,4 @@
-// z-pilot - stroke vector font. Glyphs are line segments, drawn through the
+// zpilot - stroke vector font. Glyphs are line segments, drawn through the
 // same glow pipeline as everything else.
 #pragma once
 #include "Renderer.h"

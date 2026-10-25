@@ -1,4 +1,4 @@
-// z-pilot - all HLSL, embedded and compiled at runtime.
+// zpilot - all HLSL, embedded and compiled at runtime.
 #pragma once
 
 namespace zp {
@@ -53,6 +53,8 @@ float3 emitColour(float3 c)
     return gCamUp.w > 0.5 ? c / (1.0 + c) : c;
 }
 
+// Dave Hoskins' "Hash without Sine" (MIT License, Copyright (c) 2014 David
+// Hoskins): no sin(), so it hashes the same on every GPU.
 float vhash(float2 p)
 {
     float3 q = frac(float3(p.xyx) * 0.1031);
@@ -176,10 +178,56 @@ struct VSOut {
     float  glow: TEXCOORD3;
 };
 
+// Natural materials are drawn the way a 1990s software renderer drew rock: a
+// point-sampled texture laid over the world and lit into a short ramp. Crisp
+// texels and banded light, rather than smeared noise and smooth gradients.
+static const float kTexel = 0.25;     // world units per rock texel
+static const float kRampSteps = 2.5;  // light bands per doubling of brightness
+static const float kDitherSpan = 0.5; // share of each band given to the dithered edge
+static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+
+struct Texel
+{
+    float3 centre;  // the surface point every pixel of the texel is shaded at
+    float2 uv;      // texel centre on the projection plane
+    float2 cell;
+    float3 ax, ay;  // world axes of the projection plane
+};
+
+// Projected onto whichever axis plane faces the surface best, so the cut face,
+// the steep walls of a bore and the planet's skirt all get square texels
+// instead of streaks.
+Texel rockTexel(float3 wp, float3 n)
+{
+    Texel t;
+    float3 a = abs(n);
+    if (a.z >= max(a.x, a.y)) { t.ax = float3(1, 0, 0); t.ay = float3(0, 1, 0); }
+    else if (a.x >= a.y)      { t.ax = float3(0, 0, 1); t.ay = float3(0, 1, 0); }
+    else                      { t.ax = float3(1, 0, 0); t.ay = float3(0, 0, 1); }
+    float2 p = float2(dot(wp, t.ax), dot(wp, t.ay));
+    t.cell = floor(p / kTexel);
+    t.uv = (t.cell + 0.5) * kTexel;
+    t.centre = wp + t.ax * (t.uv.x - p.x) + t.ay * (t.uv.y - p.y);
+    return t;
+}
+
+// Bands spaced evenly in stops, so the dark cut face gets as many steps as the
+// lit bore, joined by an ordered dither on the texel grid. The dither covers
+// only the edge of each band; a full-width one turns the whole face to static.
+// Only brightness is stepped: each material keeps its own hue.
+float3 rampQuantise(float3 c, float2 cell)
+{
+    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+    if (l < 1e-5) return c;
+    int2 q = int2(cell) & 3;
+    float threshold = 0.5 + ((kBayer[q.y * 4 + q.x] + 0.5) / 16.0 - 0.5) * kDitherSpan;
+    float band = floor(log2(l) * kRampSteps + threshold);
+    return c * (exp2(band / kRampSteps) / l);
+}
+
 float4 main(VSOut i) : SV_TARGET
 {
     float3 n = normalize(i.nrm);
-    float3 v = normalize(gCamPos.xyz - i.wp);
 
     const float3 keyDir  = normalize(float3(-0.40, 0.75, -0.55));
     const float3 fillDir = normalize(float3( 0.65,-0.35, -0.60));
@@ -191,18 +239,26 @@ float4 main(VSOut i) : SV_TARGET
     // Rock grain. The height field is sampled every couple of metres, so the
     // only place a boulder-sized surface can get metre-sized relief is here:
     // the gradient of the noise tilts the normal, the value itself mottles the
-    // albedo, and the two together turn a facet into stone.
+    // albedo, and the two together turn a facet into stone. It is read once
+    // per texel, at the texel's centre, and so is all the lighting below.
     float grain = gObject.z;
-    if (grain > 0.001)
+    bool rock = grain > 0.001;
+    float3 wp = i.wp;
+    float2 cell = 0;
+    if (rock)
     {
+        Texel t = rockTexel(i.wp, n);
+        wp = t.centre;
+        cell = t.cell;
         const float e = 0.45;
-        float2 q = i.wp.xy * 0.55;
+        float2 q = t.uv * 0.55;
         float g0 = rockGrain(q);
         float gx = rockGrain(q + float2(e, 0));
         float gy = rockGrain(q + float2(0, e));
-        n = normalize(n + float3(g0 - gx, g0 - gy, 0) * grain * 3.4);
+        n = normalize(n + (t.ax * (g0 - gx) + t.ay * (g0 - gy)) * grain * 3.4);
         albedo *= 0.68 + 0.64 * g0;
     }
+    float3 v = normalize(gCamPos.xyz - wp);
 
     float ndl = saturate(dot(n, keyDir));
     float ndf = saturate(dot(n, fillDir)) * 0.6;
@@ -221,50 +277,60 @@ float4 main(VSOut i) : SV_TARGET
         lit += keyCol * pow(saturate(dot(n, h)), lerp(10.0, 90.0, gloss)) * gloss * 1.3;
     }
 
-    lit += albedo * dynamicLights(i.wp, n);
+    lit += albedo * dynamicLights(wp, n);
 
     // Procedural strata: no textures, just world-space banding.
     float detail = gEmissive.a;
-    float pulse = 0.75 + 0.25 * sin(gCamPos.w * 2.2 + i.wp.x * 0.05 + i.wp.y * 0.05);
+    float pulse = 0.75 + 0.25 * sin(gCamPos.w * 2.2 + wp.x * 0.05 + wp.y * 0.05);
+    float3 glow;
     if (detail > 0.001)
     {
-        float band = sin(i.wp.y * 0.55 + sin(i.wp.x * 0.13) * 2.0);
+        float band = sin(wp.y * 0.55 + sin(wp.x * 0.13) * 2.0);
         float veins = smoothstep(0.86, 1.0, band);
         lit += albedo * veins * detail * float3(0.30, 0.55, 0.85);
-        lit *= 1.0 + 0.10 * detail * sin(i.wp.x * 0.31 + i.wp.y * 0.17);
+        lit *= 1.0 + 0.10 * detail * sin(wp.x * 0.31 + wp.y * 0.17);
 
         // The plasma itself: full strength across the whole rock face, with only
         // a gentle very-low-frequency swell so it breathes rather than pools.
         if (gPlasma.x > 0.001)
         {
-            float3 pal = plasmaField(i.wp.xy);
-            float swell = 0.72 + 0.28 * sin(i.wp.x * 0.013 - i.wp.y * 0.009 + gCamPos.w * 0.21);
+            float3 pal = plasmaField(wp.xy);
+            float swell = 0.72 + 0.28 * sin(wp.x * 0.013 - wp.y * 0.009 + gCamPos.w * 0.21);
             lit += pal * pal * gPlasma.x * detail * swell;
         }
 
         // The mesh builder ramps glow to exactly 1 on the rock/void isoline and
         // down to 0 a fixed distance inside, so shaping it here gives one crisp
-        // contour with a soft wash bleeding in behind it.
+        // contour with a soft wash bleeding in behind it. The wash belongs to
+        // the stone and is banded with it; the contour is kept apart.
         float g = saturate(i.glow);
-        lit += gEmissive.rgb * (g * g * 0.70 + smoothstep(0.86, 1.0, g) * 1.50) * pulse;
+        lit += gEmissive.rgb * (g * g * 0.70) * pulse;
+        glow = gEmissive.rgb * smoothstep(0.86, 1.0, g) * 1.50 * pulse;
     }
     else
     {
         // Props carry a constant per-vertex glow: leave it linear.
-        lit += gEmissive.rgb * i.glow * pulse;
+        glow = gEmissive.rgb * i.glow * pulse;
     }
 
-    // Meltdown wash.
+    // Meltdown wash. It scales surface and glow alike, so the two can stay
+    // apart until the stone has been through its ramp.
     float melt = gParams.y;
-    lit = lerp(lit, lit * float3(1.9, 0.42, 0.30) + float3(0.16, 0.0, 0.0) * i.glow, melt);
+    float3 meltK = lerp(1.0.xxx, float3(1.9, 0.42, 0.30), melt);
+    float torch = torchFactor(wp);
+    lit *= meltK * torch;
+    glow = (glow * meltK + float3(0.16, 0.0, 0.0) * i.glow * melt) * torch;
 
-    lit *= torchFactor(i.wp);
+    // The boundary contour is the line the player flies against, so it is
+    // never banded or dithered: its constant width is the collision contract.
+    if (rock && i.glow < 0.86) lit = rampQuantise(lit, cell);
+    lit += glow;
 
     // Depth haze so the extruded caverns read as solid volume. It fades to the
     // planet's own sky rather than a fixed grey, so the bottom of a bore and
     // the void beyond the horizon are the same colour and the slice reads as
     // one object sitting in one place.
-    float dist = length(gCamPos.xyz - i.wp);
+    float dist = length(gCamPos.xyz - wp);
     float fog = saturate(1.0 - exp(-dist * gParams.w));
     lit = lerp(lit, gSky.rgb * 1.5, fog * 0.85);
 
@@ -498,6 +564,7 @@ SamplerState smp  : register(s0);
 
 struct FSOut { float4 svp : SV_POSITION; float2 uv : TEXCOORD0; };
 
+// Dave Hoskins' "Hash without Sine", as vhash in the scene shaders.
 float hash12(float2 p)
 {
     float3 p3 = frac(float3(p.xyx) * 0.1031);

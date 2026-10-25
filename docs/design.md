@@ -1,4 +1,4 @@
-# z-pilot — the player's mental model
+# zpilot — the player's mental model
 
 This document is not a feature list. It records **what the player believes is
 happening** while they play, and the rules the code must never break in order to
@@ -336,6 +336,13 @@ procedural **grain** instead, evaluated in world space, which tilts the normal
 and mottles the albedo so the enormous low-resolution rock sheet reads as stone
 rather than as facets. No mesh gets both. That single split is what tells the
 player at a glance which things are equipment and which are the planet.
+
+Natural things are also drawn the way a software renderer of the era drew rock:
+the grain and the light are read once per world-space **texel**, on whichever
+axis plane faces the surface, and the stone's brightness is stepped into bands
+joined by an ordered dither. Crisp and point-sampled, never smeared. The boundary
+contour is kept out of that ramp — it is the collision line, so it is never
+banded or dithered.
 
 ---
 

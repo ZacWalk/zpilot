@@ -19,6 +19,9 @@ static const float FUEL_MAX = 100.0f;
 static const float BULLET_SPEED = 52.0f;
 static const float FOV = 0.87f;  // ~50 degrees
 static const float FIXED_DT = 1.0f / 120.0f;
+// Camera throw at full shake, in world units. Twice this made a big blast
+// throw the view so far the player lost the ship.
+static const float SHAKE_DISTANCE = 1.6f;
 
 // The shield capacitor is the mistake budget. Fuel is the only thing the player
 // spends, and it feeds both the engines and this - so "how clumsy can I afford
@@ -116,7 +119,6 @@ void Game::StartPlanet(int index) {
         b.friction = 0.30f;
         b.linDamp = 0.05f;
         b.flags = BF_FIXED_ROT | BF_NO_SLEEP;
-        b.tag = 1;
         // Density chosen to keep the mass near 6 after the radius change, so
         // every impact threshold below stays calibrated.
         shipBody_ = world_.AddBody(b, 1.75f);
@@ -128,7 +130,6 @@ void Game::StartPlanet(int index) {
         o.restitution = 0.24f;
         o.friction = 0.65f;
         o.linDamp = 0.10f;
-        o.tag = 2;
         podBody_ = world_.AddBody(o, 0.55f);
     }
 
@@ -146,8 +147,6 @@ void Game::StartPlanet(int index) {
         Body pb;
         pb.pos = ps.pos;
         pb.ang = ps.ang;
-        pb.index = (int)props_.size();
-        pb.tag = 10 + ps.kind;
         switch (ps.kind) {
             case PROP_TANK:
                 pb.shape = MakeCircle(ps.radius);
@@ -289,7 +288,6 @@ void Game::StartPlanet(int index) {
     podAttached_ = false;
     podDelivered_ = false;
     podPos_ = field_.orbPos;
-    podVel_ = {0, 0};
     tetherTension_ = 0;
 
     shipPos_ = field_.startPos;
@@ -353,14 +351,17 @@ void Game::Message(const char* text, float seconds) {
 void Game::Frame(float dt) {
     dt = std::min(dt, 0.05f);
     time_ += dt;
-    hudPulse_ += dt;
 
     if (win_->Pressed(KEY_FULLSCREEN)) win_->ToggleFullscreen();
     if (win_->Pressed(KEY_MUTE)) {
         audio_->SetMuted(!audio_->Muted());
         audio_->Play(SFX_UI);
     }
-    if (win_->Pressed(KEY_HELP)) showHelp_ = !showHelp_;
+    // The manual is only ever drawn over a mission. Toggled anywhere else it
+    // would stay armed unseen and pop up over the next briefing.
+    const bool inMission = mode_ == Mode::Briefing || mode_ == Mode::Playing || mode_ == Mode::Dying;
+    if (!inMission) showHelp_ = false;
+    else if (win_->Pressed(KEY_HELP)) showHelp_ = !showHelp_;
 
     // Escape ladders out one step at a time: flying -> paused -> star map -> quit.
     if (win_->Pressed(KEY_QUIT)) {
@@ -582,10 +583,6 @@ Vec2 Game::WellAccel(Vec2 p) const {
     return a;
 }
 
-Vec2 Game::GravityAt(Vec2 p) const {
-    return Vec2(0, -spec_.gravity) + WellAccel(p);
-}
-
 void Game::Simulate(float dt) {
     invuln_ = std::max(0.0f, invuln_ - dt);
     turretStun_ = std::max(0.0f, turretStun_ - dt);
@@ -619,7 +616,6 @@ void Game::Simulate(float dt) {
     shipPos_ = sb.pos;
     shipVel_ = sb.vel;
     podPos_ = world_[podBody_].pos;
-    podVel_ = world_[podBody_].vel;
 
     // Everything the ship ran into this step, converted into shield cost. Rock,
     // crates, boulders and tanks all arrive through the same door.
@@ -854,7 +850,6 @@ void Game::LatchOrb() {
         lb.friction = 0.30f;
         lb.linDamp = 0.35f;
         lb.flags = BF_NO_SLEEP;
-        lb.tag = 3;
         int id = world_.AddBody(lb, 0.18f);
         ropeLinks_.push_back(id);
         ropeJoints_.push_back(world_.AddDistance(prev, id, prevLocal, Vec2(0, 0), seg, true, 0));
@@ -1104,7 +1099,7 @@ void Game::UpdateBullets(float dt) {
                     Message("FACTORY DESTROYED - DEFENCES DEAD", 4.0f);
                 } else {
                     char buf[96];
-                    sprintf_s(buf, "REACTOR %d/%d - DEFENCES OFFLINE", reactorHits_,
+                    sprintf_s(buf, "FACTORY %d/%d - DEFENCES OFFLINE", reactorHits_,
                               spec_.reactorHits);
                     Message(buf, 2.0f);
                 }
@@ -1716,7 +1711,7 @@ void Game::GatherLights() {
 }
 
 void Game::Render() {
-    Vec2 shakeOff = rng_.inDisc() * (shake_ * 3.2f);
+    Vec2 shakeOff = shakeRng_.inDisc() * (shake_ * SHAKE_DISTANCE);
     Vec3 eye(camPos_.x + shakeOff.x, camPos_.y + shakeOff.y, camZ_);
     Vec3 at(eye.x, eye.y, 0.0f);
     Mat4 view = Mat4::lookAtLH(eye, at, {0, 1, 0});
@@ -2374,7 +2369,8 @@ void Game::RenderHud() {
                              Vec4(1.4f * a, 1.8f * a, 2.4f * a, 1.0f), 1.5f * s);
     }
 
-    if (mode_ == Mode::Briefing) {
+    // The manual replaces the centre cards rather than being read through them.
+    if (mode_ == Mode::Briefing && !showHelp_) {
         sprintf_s(buf, "GRAVITY %.1f   TURRETS %d   DRUMS %d", spec_.gravity,
                   (int)turrets_.size(), spec_.tankCount);
         CentredPanel(*r_, W * 0.5f, H * 0.30f, GlyphTextWidth(buf, 13 * s) * 1.15f, 210 * s,
@@ -2395,7 +2391,7 @@ void Game::RenderHud() {
     }
 
     // One hazard is introduced per level; this is where it gets named.
-    if (!newThreat_.empty() && (mode_ == Mode::Briefing || modeTime_ < 7.0f)) {
+    if (!newThreat_.empty() && !showHelp_ && (mode_ == Mode::Briefing || modeTime_ < 7.0f)) {
         float a = mode_ == Mode::Briefing ? 1.0f : saturatef(7.0f - modeTime_);
         float nw = GlyphTextWidth(newThreat_.c_str(), 15 * s);
         CentredPanel(*r_, W * 0.5f, H - 176 * s, nw, 15 * s, 14 * s, 0.6f * a);
@@ -2403,7 +2399,7 @@ void Game::RenderHud() {
                              Vec4(2.4f * a, 1.4f * a, 0.4f * a, 1.0f), 1.4f * s);
     }
 
-    if (paused_) {
+    if (paused_ && !showHelp_) {
         CentredPanel(*r_, W * 0.5f, H * 0.4f, GlyphTextWidth("P TO RESUME   ESC FOR THE STAR MAP", 14 * s),
                      102 * s, 30 * s, 0.72f);
         DrawGlyphTextCentred(*r_, "PAUSED", {W * 0.5f, H * 0.4f}, 46 * s, cyan, 2.8f * s);
@@ -2417,7 +2413,7 @@ void Game::RenderHud() {
     }
 
     if (showHelp_) {
-        const char* lines[] = {"Z-PILOT  FLIGHT MANUAL",
+        const char* lines[] = {"ZPILOT  FLIGHT MANUAL",
                                "",
                                "LEFT / RIGHT ... ROTATE",
                                "UP ............ MAIN THRUST",
@@ -2465,7 +2461,7 @@ void Game::RenderTitle() {
     const float s = std::max(1.0f, H / 900.0f);
 
     float wob = sinf(time_ * 1.5f) * 3.0f * s;
-    DrawGlyphTextCentred(*r_, "Z-PILOT", {W * 0.5f, H * 0.16f + wob}, 92 * s,
+    DrawGlyphTextCentred(*r_, "ZPILOT", {W * 0.5f, H * 0.16f + wob}, 92 * s,
                          Vec4(0.5f, 1.6f, 2.6f, 1.0f), 5.0f * s, 0.78f);
     DrawGlyphTextCentred(*r_, "THIRTY FIVE PLANETS - ONE SHIP EACH", {W * 0.5f, H * 0.16f + 110 * s},
                          16 * s, Vec4(1.8f, 1.0f, 0.4f, 1.0f), 1.4f * s);
