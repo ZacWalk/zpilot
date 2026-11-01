@@ -1,10 +1,15 @@
-// zpilot - entry point.
+// zpilot - entry point and deterministic capture driver.
 #include "Game.h"
+
+#include <chrono>
+#include <filesystem>
+#include <memory>
+#include <string_view>
+
+#include "platform.h"
 
 using namespace zp;
 
-// Deterministic fly-through used to render reference frames without a human at
-// the keyboard: zpilot.exe -capture
 namespace {
 
 struct Beat {
@@ -12,16 +17,14 @@ struct Beat {
     Key key;
     bool down;
 };
-// A key typed for real: sent down and up straight to the window procedure after
-// the frame's pump, so both land between two frames - the quick tap a held
-// SetKey never exercises - and no focus change can slip in between them.
+
+// A key edge pair: queued through libdesktop after the frame pump, then flushed
+// through the same reactor path as a real keyboard event.
 struct Tap {
     int frame;
-    WPARAM vk;
+    Key key;
 };
-// A lit frame is not proof the script did what the name says - a swallowed key
-// leaves the game on the screen before - so every shot also names its mode, and
-// the later ones the planet the taps should have chosen.
+
 struct Shot {
     int frame;
     const wchar_t* name;
@@ -29,39 +32,29 @@ struct Shot {
     int planet = -1;  // any
 };
 
-// The capture's exit code is this plus the index of the first shot that caught
-// a different mode or planet; tests/capture.ps1 turns it back into the shot's name.
 constexpr int kWrongShotExit = 100;
-
-constexpr int kDeepPlanet = 3;  // three taps right of the first
+constexpr int kDeepPlanet = 3;
 
 const Beat kScript[] = {
-    {80, KEY_START, true},    {82, KEY_START, false},    // title -> star map
-    {150, KEY_START, true},   {152, KEY_START, false},   // launch the first planet
-    {225, KEY_START, true},   {227, KEY_START, false},   // skip the briefing
+    {80, KEY_START, true},    {82, KEY_START, false},
+    {150, KEY_START, true},   {152, KEY_START, false},
+    {225, KEY_START, true},   {227, KEY_START, false},
     {700, KEY_TRACTOR, true}, {770, KEY_TRACTOR, false},
-    {800, KEY_SHIELD, true},  {840, KEY_SHIELD, false},  // overcharge the field
+    {800, KEY_SHIELD, true},  {840, KEY_SHIELD, false},
     {860, KEY_HELP, true},    {862, KEY_HELP, false},
     {900, KEY_HELP, true},    {902, KEY_HELP, false},
-    // Second act: back out to the star map and fly something deeper (kTaps).
-    {920, KEY_QUIT, true},    {922, KEY_QUIT, false},    // pause
-    {930, KEY_QUIT, true},    {932, KEY_QUIT, false},    // -> star map
-    {1040, KEY_START, true},  {1042, KEY_START, false},  // launch it
-    {1100, KEY_START, true},  {1102, KEY_START, false},  // skip the briefing
-    // Third act: back to the star map, relaunch, and climb straight out. That
-    // abandons the planet, which is the only scripted route to the results
-    // screen and the profile write sitting behind it.
-    {1310, KEY_QUIT, true},   {1312, KEY_QUIT, false},   // pause
-    {1320, KEY_QUIT, true},   {1322, KEY_QUIT, false},   // -> star map
-    {1360, KEY_START, true},  {1362, KEY_START, false},  // relaunch
-    {1420, KEY_START, true},  {1422, KEY_START, false},  // skip the briefing
-    // The ship clears the exit line near frame 1617, and the results screen
-    // ignores keys for its first half second, so this is the earliest press
-    // that lands with room to spare.
-    {1665, KEY_START, true},  {1667, KEY_START, false},  // results -> star map
+    {920, KEY_QUIT, true},    {922, KEY_QUIT, false},
+    {930, KEY_QUIT, true},    {932, KEY_QUIT, false},
+    {1040, KEY_START, true},  {1042, KEY_START, false},
+    {1100, KEY_START, true},  {1102, KEY_START, false},
+    {1310, KEY_QUIT, true},   {1312, KEY_QUIT, false},
+    {1320, KEY_QUIT, true},   {1322, KEY_QUIT, false},
+    {1360, KEY_START, true},  {1362, KEY_START, false},
+    {1420, KEY_START, true},  {1422, KEY_START, false},
+    {1665, KEY_START, true},  {1667, KEY_START, false},
 };
 
-const Tap kTaps[] = {{1000, VK_RIGHT}, {1012, VK_RIGHT}, {1024, VK_RIGHT}};
+const Tap kTaps[] = {{1000, KEY_RIGHT}, {1012, KEY_RIGHT}, {1024, KEY_RIGHT}};
 
 const Shot kShots[] = {
     {70, L"shots/01_title.png", Mode::Title},
@@ -81,124 +74,181 @@ const Shot kShots[] = {
     {1695, L"shots/15_starmap3.png", Mode::Grid, kDeepPlanet},
 };
 
-bool HasFlag(const wchar_t* flag) {
-    const wchar_t* cmd = GetCommandLineW();
-    return cmd && wcsstr(cmd, flag) != nullptr;
+bool HasParam(const std::span<const std::string_view> params, const std::string_view value) {
+    for (const auto param : params)
+        if (pf::icmp(param, value) == 0) return true;
+    return false;
 }
 
-}  // namespace
-
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-    // The capture's runs go in a save file of their own, started empty, so they
-    // never reach the player's log and the star map frames never depend on it.
-    const bool capture = HasFlag(L"-capture");
-    if (capture) {
-        CreateDirectoryW(L"shots", nullptr);
-        DeleteFileW(L"shots\\profile.dat");
-        Profile::UseFolder(L"shots");
+class Application {
+public:
+    bool Initialise(const pf::window_frame_ptr& frame, bool capture) {
+        capture_ = capture;
+        if (capture_) {
+            const pf::file_path shots("shots");
+            if (!pf::platform_create_directory(shots)) {
+                pf::debug_trace("zpilot: capture directory creation failed: " +
+                                pf::platform_last_error_message());
+                return false;
+            }
+            const pf::file_path runProfile = shots.combine("profile.dat");
+            const auto profileState = pf::query_file(runProfile);
+            if (profileState.status == pf::file_query_status::failed) {
+                pf::debug_trace("zpilot: capture profile query failed: " +
+                                profileState.error.message);
+                return false;
+            }
+            if (profileState.found() && pf::is_directory(runProfile)) {
+                pf::debug_trace("zpilot: capture profile path is a directory");
+                return false;
+            }
+            if (profileState.found() && !pf::platform_delete_file(runProfile)) {
+                pf::debug_trace("zpilot: capture profile cleanup failed: " +
+                                pf::platform_last_error_message());
+                return false;
+            }
+            Profile::UseFolder(shots);
+        } else {
+            Profile::UseFolder({});
+        }
+        return window_.Attach(frame);
     }
 
-    Window window;
-    if (!window.Create(L"zpilot", 1600, 900)) return 1;
+    int Run() {
+        if (!renderer_.Init(window_.Frame(), window_.Width(), window_.Height())) {
+            const std::string error = renderer_.Error().empty()
+                                          ? "Direct3D 11 initialisation failed"
+                                          : renderer_.Error();
+            if (capture_)
+                pf::debug_trace("zpilot: " + error);
+            else
+                pf::platform_show_error(error, "zpilot");
+            return 1;
+        }
+        if (!synth_.Init())
+            pf::debug_trace("zpilot: audio unavailable, continuing silently");
+        if (!game_.Init(&renderer_, &synth_, &window_)) return 1;
 
-    Renderer renderer;
-    if (!renderer.Init(window.Handle(), window.Width(), window.Height())) {
-        MessageBoxW(nullptr, L"Direct3D 11 initialisation failed.", L"zpilot", MB_OK | MB_ICONERROR);
-        return 1;
+        const int result = capture_ ? RunCapture() : RunInteractive();
+        if (synth_.AudioFailed())
+            pf::debug_trace("zpilot: audio stream failed, continuing silently");
+        return result;
     }
 
-    Synth synth;
-    if (!synth.Init()) {
-        OutputDebugStringA("zpilot: audio unavailable, continuing silently\n");
+    void Shutdown() {
+        synth_.Shutdown();
+        renderer_.Shutdown();
+        window_.Destroy();
+        Profile::UseFolder({});
     }
 
-    Game game;
-    game.Init(&renderer, &synth, &window);
-
-    if (capture) {
-        synth.SetMuted(true);
+private:
+    int RunCapture() {
+        synth_.SetMuted(true);
         int wrongShot = -1;
         for (int frame = 0; frame <= 1700; ++frame) {
-            window.NewFrame();
-            window.PumpMessages();
-            for (const Tap& t : kTaps) {
-                if (t.frame != frame) continue;
-                SendMessageW(window.Handle(), WM_KEYDOWN, t.vk, 1);
-                SendMessageW(window.Handle(), WM_KEYUP, t.vk, 0xC0000001);
+            window_.NewFrame();
+            if (!window_.PumpMessages()) break;
+            bool queuedTap = false;
+            for (const Tap& tap : kTaps) {
+                if (tap.frame != frame) continue;
+                if (!window_.QueueTap(tap.key)) return 1;
+                queuedTap = true;
             }
-            for (const Beat& b : kScript)
-                if (b.frame == frame) window.SetKey(b.key, b.down);
+            if (queuedTap && !window_.PumpMessages()) return 1;
+            for (const Beat& beat : kScript)
+                if (beat.frame == frame) window_.SetKey(beat.key, beat.down);
+
             if (frame > 235 && frame < 915) {
-                // A crude autopilot: pulse the drive to ride the shaft down, and
-                // dab the retro so the capture exercises both directions.
-                window.SetKey(KEY_UP, (frame % 46) < 13);
-                window.SetKey(KEY_DOWN, (frame % 46) > 30 && (frame % 46) < 36);
-                window.SetKey(KEY_FIRE, (frame % 150) < 8);
-                int c = frame % 260;
-                window.SetKey(KEY_LEFT, c > 200 && c < 213);
-                window.SetKey(KEY_RIGHT, c > 90 && c < 103);
+                window_.SetKey(KEY_UP, (frame % 46) < 13);
+                window_.SetKey(KEY_DOWN, (frame % 46) > 30 && (frame % 46) < 36);
+                window_.SetKey(KEY_FIRE, (frame % 150) < 8);
+                const int c = frame % 260;
+                window_.SetKey(KEY_LEFT, c > 200 && c < 213);
+                window_.SetKey(KEY_RIGHT, c > 90 && c < 103);
             }
             if (frame > 1110 && frame < 1300) {
-                window.SetKey(KEY_UP, (frame % 46) < 15);
-                window.SetKey(KEY_DOWN, (frame % 46) > 32 && (frame % 46) < 38);
-                window.SetKey(KEY_FIRE, (frame % 110) < 8);
-                int c = frame % 300;
-                window.SetKey(KEY_LEFT, c > 230 && c < 244);
-                window.SetKey(KEY_RIGHT, c > 100 && c < 114);
+                window_.SetKey(KEY_UP, (frame % 46) < 15);
+                window_.SetKey(KEY_DOWN, (frame % 46) > 32 && (frame % 46) < 38);
+                window_.SetKey(KEY_FIRE, (frame % 110) < 8);
+                const int c = frame % 300;
+                window_.SetKey(KEY_LEFT, c > 230 && c < 244);
+                window_.SetKey(KEY_RIGHT, c > 100 && c < 114);
             }
             if (frame >= 1300 && frame < 1430) {
-                window.SetKey(KEY_UP, false);
-                window.SetKey(KEY_DOWN, false);
-                window.SetKey(KEY_FIRE, false);
-                window.SetKey(KEY_LEFT, false);
-                window.SetKey(KEY_RIGHT, false);
+                window_.SetKey(KEY_UP, false);
+                window_.SetKey(KEY_DOWN, false);
+                window_.SetKey(KEY_FIRE, false);
+                window_.SetKey(KEY_LEFT, false);
+                window_.SetKey(KEY_RIGHT, false);
             }
-            // The spawn sits in open sky below the exit line, so holding the
-            // drive is a reliable way to leave without the orb.
-            if (frame >= 1430) window.SetKey(KEY_UP, true);
-            game.Frame(1.0f / 60.0f);
-            for (int i = 0; i < (int)_countof(kShots); ++i) {
-                const Shot& s = kShots[i];
-                if (s.frame != frame) continue;
-                renderer.SaveScreenshot(s.name);
-                const bool wrong = game.CurrentMode() != s.mode ||
-                                   (s.planet >= 0 && game.CurrentPlanet() != s.planet);
+            if (frame >= 1430) window_.SetKey(KEY_UP, true);
+
+            game_.Frame(1.0f / 60.0f);
+            for (int i = 0; i < (int)std::size(kShots); ++i) {
+                const Shot& shot = kShots[i];
+                if (shot.frame != frame) continue;
+                if (!renderer_.SaveScreenshot(std::filesystem::path(shot.name))) return 1;
+                const bool wrong = game_.CurrentMode() != shot.mode ||
+                                   (shot.planet >= 0 && game_.CurrentPlanet() != shot.planet);
                 if (wrongShot < 0 && wrong) wrongShot = i;
             }
-            renderer.Present(false);
+            renderer_.Present(false);
         }
-        synth.Shutdown();
-        renderer.Shutdown();
-        window.Destroy();
-        CoUninitialize();
         return wrongShot < 0 ? 0 : kWrongShotExit + wrongShot;
     }
 
-    LARGE_INTEGER freq, prev;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&prev);
+    int RunInteractive() {
+        double previous = pf::platform_get_time();
+        while (true) {
+            window_.NewFrame();
+            if (!window_.PumpMessages()) break;
+            if (window_.SizeChanged()) renderer_.Resize(window_.Width(), window_.Height());
 
-    while (true) {
-        window.NewFrame();
-        if (!window.PumpMessages()) break;
-        if (window.SizeChanged()) renderer.Resize(window.Width(), window.Height());
-
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        float dt = (float)((double)(now.QuadPart - prev.QuadPart) / (double)freq.QuadPart);
-        prev = now;
-
-        game.Frame(dt);
-        renderer.Present(true);
-
-        if (game.WantsQuit()) break;
+            const double now = pf::platform_get_time();
+            const float dt = static_cast<float>(now - previous);
+            previous = now;
+            game_.Frame(dt);
+            renderer_.Present(true);
+            if (game_.WantsQuit()) break;
+        }
+        return 0;
     }
 
-    synth.Shutdown();
-    renderer.Shutdown();
-    window.Destroy();
-    CoUninitialize();
-    return 0;
+    Window window_;
+    Renderer renderer_;
+    Synth synth_;
+    Game game_;
+    bool capture_ = false;
+};
+
+std::unique_ptr<Application> g_application;
+
+}  // namespace
+
+app_init_result app_init(const pf::window_frame_ptr& main_frame,
+                         const std::span<const std::string_view> params) {
+    g_application = std::make_unique<Application>();
+    const bool capture = HasParam(params, "-capture");
+    if (!g_application->Initialise(main_frame, capture))
+        return {false, 1};
+
+    app_init_result result;
+    result.window.initial_client_size = {1600, 900};
+    result.window.minimum_client_size = {320, 240};
+    result.window.fullscreen = false;
+    result.window.resizable = true;
+    result.main_loop = [] {
+        return g_application ? g_application->Run() : 1;
+    };
+    return result;
+}
+
+void app_idle() {}
+
+void app_destroy() {
+    if (g_application) {
+        g_application->Shutdown();
+        g_application.reset();
+    }
 }

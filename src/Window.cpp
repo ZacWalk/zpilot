@@ -1,108 +1,147 @@
 #include "Window.h"
 
+#include <cstring>
+
 namespace zp {
 
-static const wchar_t* kClassName = L"ZPilotWindow";
+namespace {
 
-// Opt in at the highest level the OS offers, so the backbuffer is native pixels
-// instead of a stretched 96 DPI bitmap.
-static void EnableDpiAwareness() {
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (user32) {
-        using SetCtxFn = BOOL(WINAPI*)(HANDLE);
-        auto setCtx = (SetCtxFn)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
-        const HANDLE kPerMonitorV2 = (HANDLE)-4;
-        if (setCtx && setCtx(kPerMonitorV2)) return;
+Key KeyForVirtualCode(const uint32_t vk) {
+    switch (vk) {
+        case pf::platform_key::Left: case 'A': return KEY_LEFT;
+        case pf::platform_key::Right: case 'D': return KEY_RIGHT;
+        case pf::platform_key::Up: case 'W': return KEY_UP;
+        case pf::platform_key::Down: case 'S': return KEY_DOWN;
+        case pf::platform_key::Space: return KEY_FIRE;
+        case pf::platform_key::Shift: case 'E': return KEY_TRACTOR;
+        case pf::platform_key::Control: case 'Q': return KEY_SHIELD;
+        case pf::platform_key::Tab: case 'F': return KEY_SLOW;
+        case pf::platform_key::Return: return KEY_START;
+        case 'P': return KEY_PAUSE;
+        case 'R': return KEY_RESTART;
+        case pf::platform_key::Escape: return KEY_QUIT;
+        case pf::platform_key::F1: return KEY_HELP;
+        case pf::platform_key::F3: return KEY_MUTE;
+        case pf::platform_key::F11: return KEY_FULLSCREEN;
+        case pf::platform_key::F12: return KEY_SHOT;
+        default: return KEY_COUNT;
     }
-    if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
-        using SetAwarenessFn = HRESULT(WINAPI*)(int);
-        auto setAwareness = (SetAwarenessFn)GetProcAddress(shcore, "SetProcessDpiAwareness");
-        if (setAwareness && SUCCEEDED(setAwareness(2))) return;  // PROCESS_PER_MONITOR_DPI_AWARE
-    }
-    SetProcessDPIAware();
 }
 
-static UINT SystemDpi() {
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (user32) {
-        using GetDpiFn = UINT(WINAPI*)();
-        if (auto get = (GetDpiFn)GetProcAddress(user32, "GetDpiForSystem")) return get();
+uint32_t VirtualCodeForKey(const Key key) {
+    switch (key) {
+        case KEY_LEFT: return pf::platform_key::Left;
+        case KEY_RIGHT: return pf::platform_key::Right;
+        case KEY_UP: return pf::platform_key::Up;
+        case KEY_DOWN: return pf::platform_key::Down;
+        case KEY_FIRE: return pf::platform_key::Space;
+        case KEY_TRACTOR: return pf::platform_key::Shift;
+        case KEY_SHIELD: return pf::platform_key::Control;
+        case KEY_SLOW: return pf::platform_key::Tab;
+        case KEY_START: return pf::platform_key::Return;
+        case KEY_PAUSE: return 'P';
+        case KEY_RESTART: return 'R';
+        case KEY_QUIT: return pf::platform_key::Escape;
+        case KEY_HELP: return pf::platform_key::F1;
+        case KEY_MUTE: return pf::platform_key::F3;
+        case KEY_FULLSCREEN: return pf::platform_key::F11;
+        case KEY_SHOT: return pf::platform_key::F12;
+        default: return 0;
     }
-    HDC dc = GetDC(nullptr);
-    UINT dpi = dc ? (UINT)GetDeviceCaps(dc, LOGPIXELSY) : 96;
-    if (dc) ReleaseDC(nullptr, dc);
-    return dpi ? dpi : 96;
 }
 
-static void AdjustForDpi(RECT* rc, DWORD style, UINT dpi) {
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (user32) {
-        using AdjustFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
-        if (auto adjust = (AdjustFn)GetProcAddress(user32, "AdjustWindowRectExForDpi")) {
-            adjust(rc, style, FALSE, 0, dpi);
-            return;
+}  // namespace
+
+struct Window::Reactor final : pf::frame_reactor {
+    explicit Reactor(Window* owner_) : owner(owner_) {}
+
+    uint32_t handle_message(pf::window_frame_ptr frame, pf::message_type message,
+                            const pf::message_params&) override {
+        switch (message) {
+            case pf::message_type::create:
+                frame->set_text("zpilot");
+                return 0;
+            case pf::message_type::destroy:
+                owner->quit_ = true;
+                return 0;
+            case pf::message_type::close:
+                owner->quit_ = true;
+                frame->close();
+                return 0;
+            case pf::message_type::kill_focus:
+                owner->ClearInput();
+                return 0;
+            case pf::message_type::erase_background:
+                // The D3D backend redraws the entire client area every frame.
+                return 1;
+            default:
+                return 0;
         }
     }
-    AdjustWindowRect(rc, style, FALSE);
+
+    uint32_t handle_keyboard(pf::window_frame_ptr, pf::keyboard_message_type message,
+                             const pf::keyboard_params& params) override {
+        if (message == pf::keyboard_message_type::key_down)
+            owner->InjectKeyCode(params.vk, true, params.repeat);
+        else if (message == pf::keyboard_message_type::key_up)
+            owner->InjectKeyCode(params.vk, false);
+        return 0;
+    }
+
+    uint32_t handle_mouse(pf::window_frame_ptr, pf::mouse_message_type message,
+                          const pf::mouse_params&) override {
+        switch (message) {
+            case pf::mouse_message_type::left_button_down: owner->SetButton(KEY_FIRE, true); break;
+            case pf::mouse_message_type::left_button_up: owner->SetButton(KEY_FIRE, false); break;
+            case pf::mouse_message_type::right_button_down: owner->SetButton(KEY_TRACTOR, true); break;
+            case pf::mouse_message_type::right_button_up: owner->SetButton(KEY_TRACTOR, false); break;
+            default: break;
+        }
+        return 0;
+    }
+
+    void handle_paint(pf::window_frame_ptr&, pf::draw_context&) override {}
+
+    void handle_size(pf::window_frame_ptr&, pf::isize extent, pf::measure_context&) override {
+        owner->width_ = extent.cx;
+        owner->height_ = extent.cy;
+        owner->sizeChanged_ = true;
+    }
+
+    Window* owner = nullptr;
+};
+
+Window::~Window() {
+    Destroy();
 }
 
-bool Window::Create(const wchar_t* title, int w, int h) {
-    EnableDpiAwareness();
-
-    WNDCLASSEXW wc = {sizeof(WNDCLASSEXW)};
-    wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
-    wc.lpfnWndProc = &Window::WndProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    wc.lpszClassName = kClassName;
-    RegisterClassExW(&wc);
-
-    // The requested size is in 96 DPI units; grow it to physical pixels, then
-    // shrink to fit the work area if the monitor cannot hold it.
-    UINT dpi = SystemDpi();
-    float scale = dpi / 96.0f;
-    RECT work = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    float fit = std::min(1.0f, std::min((work.right - work.left - 40) / (w * scale),
-                                        (work.bottom - work.top - 80) / (h * scale)));
-    width_ = std::max(320, (int)(w * scale * fit));
-    height_ = std::max(240, (int)(h * scale * fit));
-
-    RECT rc = {0, 0, width_, height_};
-    AdjustForDpi(&rc, WS_OVERLAPPEDWINDOW, dpi);
-
-    hwnd_ = CreateWindowExW(0, kClassName, title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                            rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr,
-                            wc.hInstance, this);
-    if (!hwnd_) return false;
-
-    ShowWindow(hwnd_, SW_SHOW);
-    UpdateWindow(hwnd_);
+bool Window::Attach(const pf::window_frame_ptr& frame) {
+    if (frame_) Destroy();
+    frame_ = frame;
+    if (!frame_) return false;
+    reactor_ = std::make_shared<Reactor>(this);
+    frame_->set_reactor(reactor_);
+    const pf::irect client = frame_->get_client_rect();
+    if (client.width() > 0) width_ = client.width();
+    if (client.height() > 0) height_ = client.height();
     return true;
 }
 
 void Window::Destroy() {
-    if (hwnd_) {
-        DestroyWindow(hwnd_);
-        hwnd_ = nullptr;
-    }
+    if (frame_) frame_->set_reactor(nullptr);
+    reactor_.reset();
+    frame_.reset();
 }
 
 bool Window::PumpMessages() {
-    MSG msg;
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) quit_ = true;
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
+    if (!pf::platform_events()) quit_ = true;
     return !quit_;
 }
 
 bool Window::SizeChanged() {
-    bool c = sizeChanged_;
+    const bool changed = sizeChanged_;
     sizeChanged_ = false;
-    return c;
+    return changed;
 }
 
 void Window::NewFrame() {
@@ -110,107 +149,40 @@ void Window::NewFrame() {
     memset(tapped_, 0, sizeof(tapped_));
 }
 
-void Window::ToggleFullscreen() {
-    DWORD style = GetWindowLong(hwnd_, GWL_STYLE);
-    if (!fullscreen_) {
-        MONITORINFO mi = {sizeof(MONITORINFO)};
-        if (GetWindowPlacement(hwnd_, &placement_) &&
-            GetMonitorInfo(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi)) {
-            SetWindowLong(hwnd_, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
-            SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-                         mi.rcMonitor.right - mi.rcMonitor.left,
-                         mi.rcMonitor.bottom - mi.rcMonitor.top,
-                         SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-            fullscreen_ = true;
-        }
-    } else {
-        SetWindowLong(hwnd_, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
-        SetWindowPlacement(hwnd_, &placement_);
-        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-        fullscreen_ = false;
-    }
+bool Window::QueueTap(const Key key) {
+    if (!frame_) return false;
+    const uint32_t vk = VirtualCodeForKey(key);
+    return vk != 0 && pf::post_key_events(frame_, vk, true) &&
+           pf::post_key_events(frame_, vk, false);
 }
 
-// Edges are read once a frame, so a key that goes down and back up inside one
-// frame is never seen by down_ alone; `fresh` (not an auto-repeat) latches it.
-void Window::SetVirtualKey(WPARAM vk, bool down, bool fresh) {
-    Key k;
-    switch (vk) {
-        case VK_LEFT: case 'A': k = KEY_LEFT; break;
-        case VK_RIGHT: case 'D': k = KEY_RIGHT; break;
-        case VK_UP: case 'W': k = KEY_UP; break;
-        case VK_DOWN: case 'S': k = KEY_DOWN; break;
-        case VK_SPACE: k = KEY_FIRE; break;
-        case VK_SHIFT: case 'E': k = KEY_TRACTOR; break;
-        case VK_CONTROL: case 'Q': k = KEY_SHIELD; break;
-        case VK_TAB: case 'F': k = KEY_SLOW; break;
-        case VK_RETURN: k = KEY_START; break;
-        case 'P': k = KEY_PAUSE; break;
-        case 'R': k = KEY_RESTART; break;
-        case VK_ESCAPE: k = KEY_QUIT; break;
-        case VK_F1: k = KEY_HELP; break;
-        case VK_F3: k = KEY_MUTE; break;
-        case VK_F11: k = KEY_FULLSCREEN; break;
-        case VK_F12: k = KEY_SHOT; break;
-        default: return;
-    }
+void Window::InjectKeyCode(const uint32_t vk, const bool down, const bool repeat) {
+    const Key k = KeyForVirtualCode(vk);
+    if (k == KEY_COUNT) return;
+    SetVirtualKey(vk, down, down && !repeat);
+}
+
+void Window::ToggleFullscreen() {
+    if (!frame_) return;
+    frame_->toggle_fullscreen();
+}
+
+void Window::SetVirtualKey(const uint32_t vk, const bool down, const bool fresh) {
+    const Key k = KeyForVirtualCode(vk);
+    if (k == KEY_COUNT) return;
     down_[k] = down;
     if (down && fresh) tapped_[k] = true;
 }
 
-void Window::SetButton(Key k, bool down) {
+void Window::SetButton(const Key k, const bool down) {
     down_[k] = down;
     if (down) tapped_[k] = true;
 }
 
-LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    Window* self = reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (msg == WM_NCCREATE) {
-        CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
-    } else if (self) {
-        switch (msg) {
-            case WM_DESTROY:
-                self->quit_ = true;
-                PostQuitMessage(0);
-                return 0;
-            case WM_SIZE:
-                if (wp != SIZE_MINIMIZED) {
-                    self->width_ = LOWORD(lp);
-                    self->height_ = HIWORD(lp);
-                    self->sizeChanged_ = true;
-                }
-                return 0;
-            case WM_DPICHANGED: {
-                const RECT* r = reinterpret_cast<const RECT*>(lp);
-                SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left,
-                             r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
-                return 0;
-            }
-            case WM_KEYDOWN:
-            case WM_SYSKEYDOWN:
-                self->SetVirtualKey(wp, true, (lp & (1 << 30)) == 0);
-                // Alt+F4 has to reach DefWindowProc to become a close; every
-                // other Alt chord stays the game's.
-                if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;
-                return 0;
-            case WM_KEYUP:
-            case WM_SYSKEYUP:
-                self->SetVirtualKey(wp, false, false);
-                return 0;
-            case WM_KILLFOCUS:
-                memset(self->down_, 0, sizeof(self->down_));
-                memset(self->tapped_, 0, sizeof(self->tapped_));
-                return 0;
-            case WM_LBUTTONDOWN: self->SetButton(KEY_FIRE, true); return 0;
-            case WM_LBUTTONUP: self->SetButton(KEY_FIRE, false); return 0;
-            case WM_RBUTTONDOWN: self->SetButton(KEY_TRACTOR, true); return 0;
-            case WM_RBUTTONUP: self->SetButton(KEY_TRACTOR, false); return 0;
-            default: break;
-        }
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
+void Window::ClearInput() {
+    memset(down_, 0, sizeof(down_));
+    memset(prevDown_, 0, sizeof(prevDown_));
+    memset(tapped_, 0, sizeof(tapped_));
 }
 
 }  // namespace zp

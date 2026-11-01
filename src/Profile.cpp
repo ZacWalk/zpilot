@@ -1,7 +1,8 @@
 #include "Profile.h"
 
-#include <cerrno>
-#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
 
 #include "Field.h"
 
@@ -10,10 +11,15 @@ namespace zp {
 static const uint32_t kMagic = 0x5A50524Fu;  // 'ZPRO'
 static const uint32_t kFileVersion = 2;
 
-static wchar_t g_folder[MAX_PATH] = L"";
+static pf::file_path g_folder;
+static pf::file_path g_defaultRootForTests;
 
-void Profile::UseFolder(const wchar_t* folder) {
-    wcscpy_s(g_folder, folder);
+void Profile::UseFolder(const pf::file_path& folder) {
+    g_folder = folder;
+}
+
+void Profile::UseDefaultRootForTests(const pf::file_path& root) {
+    g_defaultRootForTests = root;
 }
 
 int MedalFor(int percent) {
@@ -23,109 +29,158 @@ int MedalFor(int percent) {
     return MEDAL_NONE;
 }
 
-static void ProfileError(const wchar_t* operation, unsigned long code) {
-    wchar_t message[192];
-    swprintf_s(message, L"zpilot: profile %s failed (error %lu)\n", operation, code);
-    OutputDebugStringW(message);
+static std::string LastPlatformError() {
+    const std::string error = pf::platform_last_error_message();
+    return error.empty() ? "unknown platform error" : error;
 }
 
-static bool ProfilePath(wchar_t* out, size_t count, bool legacy = false) {
-    std::wstring dir;
-    if (g_folder[0]) {
-        dir = g_folder;
-    } else {
-        wchar_t appData[MAX_PATH];
-        const auto length = GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
-        if (!length || length >= MAX_PATH) {
-            ProfileError(L"path", length ? ERROR_INSUFFICIENT_BUFFER : GetLastError());
-            return false;
-        }
-        dir = std::wstring(appData) + (legacy ? L"\\z-pilot" : L"\\zpilot");
+static void ProfileError(const char* operation, const std::string_view detail) {
+    std::string message = "zpilot: profile ";
+    message += operation;
+    message += " failed";
+    if (!detail.empty()) {
+        message += " (";
+        message += detail;
+        message += ')';
     }
-    const auto path = dir + L"\\profile.dat";
-    if (path.size() >= count) {
-        ProfileError(L"path", ERROR_INSUFFICIENT_BUFFER);
+    pf::debug_trace(message);
+}
+
+static bool ProfilePath(pf::file_path* out, const bool legacy = false) {
+    if (!g_folder.empty()) {
+        *out = g_folder.combine("profile.dat");
+        return true;
+    }
+
+    pf::file_path root = g_defaultRootForTests;
+    if (root.empty()) root = pf::roaming_app_data_path();
+    if (root.empty()) {
+        ProfileError("path", "roaming application-data folder unavailable");
         return false;
     }
-    wcscpy_s(out, count, path.c_str());
+
+    *out = root.combine(legacy ? "z-pilot" : "zpilot").combine("profile.dat");
+    return true;
+}
+
+static bool ReadExact(const pf::file_handle_ptr& file, uint8_t* data, const uint32_t bytes) {
+    uint32_t offset = 0;
+    while (offset < bytes) {
+        uint32_t read = 0;
+        if (!file->read(data + offset, bytes - offset, &read) || read == 0) return false;
+        offset += read;
+    }
     return true;
 }
 
 void Profile::Load() {
     for (auto& r : rows_) r = PlanetRecord();
 
-    wchar_t path[MAX_PATH];
-    if (!ProfilePath(path, MAX_PATH)) return;
-    FILE* f = nullptr;
-    auto error = _wfopen_s(&f, path, L"rb");
-    // Import only when the new profile is absent. Never replace it with an older save, and
-    // never consult the player's directories during an isolated capture or test.
-    if (error == ENOENT && !g_folder[0]) {
-        if (!ProfilePath(path, MAX_PATH, true)) return;
-        error = _wfopen_s(&f, path, L"rb");
+    pf::file_path path;
+    if (!ProfilePath(&path)) return;
+
+    auto opened = pf::open_for_read_result(path);
+    if (!opened.success() && opened.result.code == pf::file_error::no_such_file &&
+        g_folder.empty()) {
+        if (!ProfilePath(&path, true)) return;
+        opened = pf::open_for_read_result(path);
     }
-    if (error != 0 || !f) {
-        if (error != ENOENT) ProfileError(L"read", error);
+    if (!opened.success()) {
+        if (opened.result.code != pf::file_error::no_such_file)
+            ProfileError("read", opened.result.message);
+        return;
+    }
+    const auto& file = opened.file;
+
+    constexpr uint32_t kHeaderBytes = sizeof(uint32_t) * 4;
+    constexpr uint32_t kRecordBytes = sizeof(PlanetRecord) * kPlanetCount;
+    constexpr uint32_t kFileBytes = kHeaderBytes + kRecordBytes;
+    if (file->size() < kFileBytes) {
+        ProfileError("read", "profile is shorter than its record format");
+        return;
+    }
+
+    std::vector<uint8_t> bytes(kFileBytes);
+    if (!ReadExact(file, bytes.data(), kFileBytes)) {
+        ProfileError("read", "profile read was incomplete");
         return;
     }
 
     uint32_t magic = 0, ver = 0, gen = 0, count = 0;
-    bool ok = fread(&magic, sizeof(magic), 1, f) == 1 && magic == kMagic &&
-              fread(&ver, sizeof(ver), 1, f) == 1 && ver == kFileVersion &&
-              fread(&gen, sizeof(gen), 1, f) == 1 && fread(&count, sizeof(count), 1, f) == 1;
+    size_t offset = 0;
+    auto read_u32 = [&](uint32_t* value) {
+        std::memcpy(value, bytes.data() + offset, sizeof(*value));
+        offset += sizeof(*value);
+    };
+    read_u32(&magic);
+    read_u32(&ver);
+    read_u32(&gen);
+    read_u32(&count);
+
     // A generator change means the saved planets no longer exist. Rather than
     // show scores against caverns nobody can play, start the log again.
     PlanetRecord rows[kPlanetCount];
-    if (ok && gen == kGenVersion && count == (uint32_t)kPlanetCount &&
-        fread(rows, sizeof(PlanetRecord), kPlanetCount, f) == (size_t)kPlanetCount) {
-        // Only Submit writes a record, so anything it could never produce means
-        // the file was damaged. Keep what can be trusted rather than show a
-        // card at 255%.
-        for (int i = 0; i < kPlanetCount; ++i) {
-            PlanetRecord& r = rows[i];
-            r.attempted = r.attempted ? 1 : 0;
-            r.completed = r.completed ? 1 : 0;
-            r.bestScore = (uint8_t)std::min<int>(r.bestScore, 100);
-            r.medal = (uint8_t)MedalFor(r.bestScore);
-            r.relics = (uint8_t)std::min<int>(r.relics, 3);
-            rows_[i] = r;
-        }
+    if (magic != kMagic || ver != kFileVersion || gen != kGenVersion ||
+        count != (uint32_t)kPlanetCount)
+        return;
+
+    std::memcpy(rows, bytes.data() + offset, sizeof(rows));
+    // Only Submit writes a record, so anything it could never produce means
+    // the file was damaged. Keep what can be trusted rather than show a
+    // card at 255%.
+    for (int i = 0; i < kPlanetCount; ++i) {
+        PlanetRecord& r = rows[i];
+        r.attempted = r.attempted ? 1 : 0;
+        r.completed = r.completed ? 1 : 0;
+        r.bestScore = (uint8_t)std::min<int>(r.bestScore, 100);
+        r.medal = (uint8_t)MedalFor(r.bestScore);
+        r.relics = (uint8_t)std::min<int>(r.relics, 3);
+        rows_[i] = r;
     }
-    fclose(f);
 }
 
 void Profile::Save() const {
-    wchar_t path[MAX_PATH];
-    if (!ProfilePath(path, MAX_PATH)) return;
-    std::wstring folder(path);
-    folder.resize(folder.find_last_of(L'\\'));
-    if (!CreateDirectoryW(folder.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        ProfileError(L"directory creation", GetLastError());
-        return;
-    }
-    wchar_t tmp[MAX_PATH + 4];
-    swprintf_s(tmp, L"%s.tmp", path);
+    pf::file_path path;
+    if (!ProfilePath(&path)) return;
 
-    FILE* f = nullptr;
-    const auto error = _wfopen_s(&f, tmp, L"wb");
-    if (error != 0 || !f) {
-        ProfileError(L"write", error);
-        return;
-    }
-    uint32_t gen = kGenVersion, count = kPlanetCount;
-    const bool written = fwrite(&kMagic, sizeof(kMagic), 1, f) == 1 &&
-                         fwrite(&kFileVersion, sizeof(kFileVersion), 1, f) == 1 &&
-                         fwrite(&gen, sizeof(gen), 1, f) == 1 &&
-                         fwrite(&count, sizeof(count), 1, f) == 1 &&
-                         fwrite(rows_, sizeof(PlanetRecord), kPlanetCount, f) == (size_t)kPlanetCount;
-    const auto closed = fclose(f);
-    if (!written || closed != 0) {
-        ProfileError(L"write", errno);
+    if (!pf::platform_create_directory(path.folder())) {
+        ProfileError("directory creation", LastPlatformError());
         return;
     }
 
-    if (!MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        ProfileError(L"replacement", GetLastError());
+    constexpr uint32_t kHeaderBytes = sizeof(uint32_t) * 4;
+    constexpr uint32_t kRecordBytes = sizeof(PlanetRecord) * kPlanetCount;
+    constexpr uint32_t kFileBytes = kHeaderBytes + kRecordBytes;
+    std::vector<uint8_t> bytes(kFileBytes);
+    size_t offset = 0;
+    auto write_u32 = [&](const uint32_t value) {
+        std::memcpy(bytes.data() + offset, &value, sizeof(value));
+        offset += sizeof(value);
+    };
+    write_u32(kMagic);
+    write_u32(kFileVersion);
+    write_u32(kGenVersion);
+    write_u32(kPlanetCount);
+    std::memcpy(bytes.data() + offset, rows_, sizeof(rows_));
+
+    const auto opened = pf::create_atomic_file_writer_result(path);
+    if (!opened.success()) {
+        ProfileError("staging", opened.result.message);
+        return;
+    }
+    const auto writer = opened.writer;
+    const auto written = writer->write(std::span<const uint8_t>(bytes.data(), bytes.size()));
+    if (!written) {
+        ProfileError("write", written.message);
+        return;
+    }
+    const auto flushed = writer->flush();
+    if (!flushed) {
+        ProfileError("flush", flushed.message);
+        return;
+    }
+    const auto committed = writer->commit();
+    if (!committed) ProfileError("replacement", committed.message);
 }
 
 bool Profile::Submit(int planet, int percent, int relics, bool completed) {

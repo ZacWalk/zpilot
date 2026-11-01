@@ -41,12 +41,30 @@ if ($expected.Count -eq 0) {
 }
 
 $shots = Join-Path $WorkDir 'shots'
-Remove-Item (Join-Path $shots '*.png') -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $shots -PathType Leaf) {
+    Write-Host "FAIL  capture path is a file, not a directory: $shots"
+    exit 1
+}
+if (Test-Path -LiteralPath $shots -PathType Container) {
+    foreach ($oldShot in @(Get-ChildItem -LiteralPath $shots -Filter '*.png' -File -ErrorAction Stop)) {
+        Remove-Item -LiteralPath $oldShot.FullName -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $oldShot.FullName) {
+            Write-Host "FAIL  could not remove old screenshot $($oldShot.FullName)"
+            exit 1
+        }
+    }
+}
 
 # The third act ends a run, so the capture writes a save file: its own, beside
 # the shots. The player's log in %APPDATA% must come through untouched.
 $runProfile = Join-Path $shots 'profile.dat'
-Remove-Item $runProfile -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $runProfile) {
+    Remove-Item -LiteralPath $runProfile -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $runProfile) {
+        Write-Host "FAIL  could not remove old capture profile $runProfile"
+        exit 1
+    }
+}
 $playerProfiles = @(
     (Join-Path $env:APPDATA 'zpilot\profile.dat'),
     (Join-Path $env:APPDATA 'z-pilot\profile.dat')

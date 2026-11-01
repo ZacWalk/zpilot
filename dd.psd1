@@ -5,7 +5,7 @@
         type = 'gui'
         'default-target' = 'app'
     }
-    dependencies = @{ owner = 'dd' }
+    dependencies = @{ owner = 'application' }
     build = @{
         'x64-windows' = @{
             debug = 'debug'

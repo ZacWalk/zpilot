@@ -4,11 +4,17 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
+
+#include <windows.h>
+
+#include "../src/Synth.h"
 
 namespace fs = std::filesystem;
 
 static int checks = 0;
+int RunWindowChecks();
 
 static void Check(bool condition, const char* message) {
     ++checks;
@@ -23,13 +29,6 @@ static std::string Read(const fs::path& path) {
 
 int main()
 {
-    std::wstring previousAppData;
-    const auto length = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
-    if (length) {
-        previousAppData.resize(length);
-        GetEnvironmentVariableW(L"APPDATA", previousAppData.data(), length);
-        previousAppData.resize(length - 1);
-    }
     const auto root = fs::temp_directory_path() /
         ("zpilot-profile-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
     if (!fs::create_directory(root)) {
@@ -38,17 +37,17 @@ int main()
     }
     int result = 0;
     try {
-        Check(SetEnvironmentVariableW(L"APPDATA", root.c_str()) != 0, "set isolated APPDATA");
+        zp::Profile::UseDefaultRootForTests(pf::file_path(root.string()));
         const auto legacy = root / "z-pilot";
         const auto legacyFile = legacy / "profile.dat";
         const auto currentFile = root / "zpilot" / "profile.dat";
-        zp::Profile::UseFolder(legacy.c_str());
+        zp::Profile::UseFolder(pf::file_path(legacy.string()));
         zp::Profile saved;
         saved.Submit(0, 73, 2, true);
         saved.Save();
         const auto original = Read(legacyFile);
 
-        zp::Profile::UseFolder(L"");
+        zp::Profile::UseFolder({});
         zp::Profile migrated;
         migrated.Load();
         Check(migrated.At(0).bestScore == 73 && migrated.At(0).relics == 2 &&
@@ -70,8 +69,42 @@ int main()
         current.Load();
         Check(current.At(0).bestScore == 0, "an existing corrupt profile must not resurrect old progress");
 
+        const auto strayBackup = currentFile.parent_path() / "profile.dat.bak";
+        {
+            std::ofstream backup(strayBackup, std::ios::binary | std::ios::trunc);
+            backup << "keep this unrelated file";
+        }
+        current.Submit(0, 77, 1, false);
+        current.Save();
+        Check(Read(strayBackup) == "keep this unrelated file",
+              "publishing must not delete an unrelated backup-looking file");
+        {
+            std::ofstream broken(currentFile, std::ios::binary | std::ios::trunc);
+            broken << "invalid";
+        }
+        const auto unchanged = Read(currentFile);
+        pf::test_set_atomic_file_failure(pf::atomic_file_test_failure::stage_collision);
+        current.Save();
+        pf::test_set_atomic_file_failure(pf::atomic_file_test_failure::none);
+        Check(Read(currentFile) != unchanged,
+              "an atomic stage collision must retry without losing the live profile");
+        {
+            std::ofstream broken(currentFile, std::ios::binary | std::ios::trunc);
+            broken << "invalid";
+        }
+        for (const auto failure : {pf::atomic_file_test_failure::open,
+                                   pf::atomic_file_test_failure::write,
+                                   pf::atomic_file_test_failure::flush,
+                                   pf::atomic_file_test_failure::commit}) {
+            pf::test_set_atomic_file_failure(failure);
+            current.Save();
+            pf::test_set_atomic_file_failure(pf::atomic_file_test_failure::none);
+            Check(Read(currentFile) == unchanged,
+                  "a failed atomic publish must preserve the live profile");
+        }
+
         const auto isolated = root / "capture";
-        zp::Profile::UseFolder(isolated.c_str());
+        zp::Profile::UseFolder(pf::file_path(isolated.string()));
         current.Load();
         Check(current.At(0).bestScore == 0, "an isolated capture must not import the player's legacy profile");
         current.Submit(0, 42, 1, false);
@@ -80,7 +113,15 @@ int main()
         Check(Read(currentFile) == "invalid", "an isolated save must not change the new player profile");
         Check(Read(legacyFile) == original, "an isolated save must not change the old player profile");
 
-        zp::Profile::UseFolder(L"");
+        const pf::file_path unicodeFolder(root.string() + "\\capture-\xC3\xA9");
+        zp::Profile::UseFolder(unicodeFolder);
+        zp::Profile unicode;
+        unicode.Submit(0, 51, 1, false);
+        unicode.Save();
+        Check(unicodeFolder.combine("profile.dat").exists(),
+              "shared file paths preserve non-ASCII capture folders");
+
+        zp::Profile::UseFolder({});
         fs::remove(currentFile);
         fs::create_directory(currentFile);
         current.Load();
@@ -89,22 +130,28 @@ int main()
         current.Save();
         Check(fs::is_directory(currentFile), "a failed replacement must preserve its destination");
         Check(Read(legacyFile) == original, "a failed new save must not change the legacy file");
+
+        checks += RunWindowChecks();
+        Check(zp::AudioSampleToPcm16(-2.0f) == -32767, "PCM clips negative samples");
+        Check(zp::AudioSampleToPcm16(-1.0f) == -32767, "PCM preserves negative full scale");
+        Check(zp::AudioSampleToPcm16(0.5f) == 16384, "PCM rounds positive samples");
+        Check(zp::AudioSampleToPcm16(1.0f) == 32767, "PCM preserves positive full scale");
+        Check(zp::AudioSampleToPcm16(2.0f) == 32767, "PCM clips positive samples");
+        Check(zp::AudioSampleToPcm16(std::numeric_limits<float>::quiet_NaN()) == 0,
+              "PCM sanitises non-finite samples");
     }
     catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         result = 1;
     }
-    zp::Profile::UseFolder(L"");
-    if (!SetEnvironmentVariableW(L"APPDATA", length ? previousAppData.c_str() : nullptr)) {
-        std::cerr << "FAIL: could not restore APPDATA\n";
-        result = 1;
-    }
+    zp::Profile::UseFolder({});
+    zp::Profile::UseDefaultRootForTests({});
     std::error_code cleanupError;
     fs::remove_all(root, cleanupError);
     if (cleanupError) {
         std::cerr << "FAIL: could not remove profile fixtures: " << cleanupError.message() << '\n';
         result = 1;
     }
-    std::cout << checks << " profile checks, " << (result ? "FAILED" : "passed") << '\n';
+    std::cout << checks << " profile/input checks, " << (result ? "FAILED" : "passed") << '\n';
     return result;
 }

@@ -1,6 +1,8 @@
 #include "Game.h"
 
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
 
 namespace zp {
 
@@ -468,11 +470,9 @@ void Game::Frame(float dt) {
     Render();
 
     if (win_->Pressed(KEY_SHOT)) {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        wchar_t path[128];
-        swprintf_s(path, L"zpilot_%02d%02d%02d_%03d.png", st.wHour, st.wMinute, st.wSecond,
-                   st.wMilliseconds);
+        const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto path = std::filesystem::path("zpilot_" + std::to_string(stamp) + ".png");
         if (r_->SaveScreenshot(path)) Message("SCREENSHOT SAVED", 1.5f);
     }
 }

@@ -1,7 +1,9 @@
 // zpilot - persistent pilot record: one row per planet, written atomically so
 // a crash mid-save cannot cost the player their progress.
 #pragma once
+
 #include "Common.h"
+#include "platform.h"
 
 namespace zp {
 
@@ -22,9 +24,13 @@ struct PlanetRecord {
 
 class Profile {
 public:
-    // Keeps the record in `folder` instead of %APPDATA%\zpilot. The scripted
-    // capture flies real runs, and they must not land in the player's log.
-    static void UseFolder(const wchar_t* folder);
+    // Keeps the record in `folder` instead of the shared roaming
+    // application-data zpilot folder. The scripted capture flies real runs,
+    // and they must not land in the player's log.
+    static void UseFolder(const pf::file_path& folder);
+    // Isolated fixture root for the profile migration suite; production leaves
+    // this empty and uses pf::roaming_app_data_path().
+    static void UseDefaultRootForTests(const pf::file_path& root);
 
     void Load();
     void Save() const;

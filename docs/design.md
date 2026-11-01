@@ -362,3 +362,27 @@ A change that breaks any of these is wrong regardless of how it looks:
 9. No external assets, and natural geometry never looks made.
 10. Every light in the world belongs to an object in the fiction; rock takes a
     highlight from nothing.
+
+---
+
+## 12. Platform and renderer boundary
+
+The window, input, frame loop, DPI/fullscreen behaviour and audio endpoint come
+from libdesktop's platform-neutral `pf::` layer. `Window` translates those
+events into the game's key states and keeps the one-frame tap latch; focus loss
+clears held input before the next simulation frame. The scripted capture uses
+the same input seam, including its short taps, so the three capture acts remain
+coverage rather than a second game loop.
+
+The scene renderer is deliberately **not** libdesktop-render. zpilot's HDR scene
+buffer, additive batches, three-level bloom chain, shockwave and CRT composite
+are the game's visual language and remain an explicit Direct3D 11 backend.
+Only that backend asks libdesktop's Windows interop seam for the native swap-chain
+target. No public game or portable header exposes a Windows handle, and no
+shared desktop renderer replaces the procedural meshes, shaders, post effects or
+deterministic capture output.
+
+Screenshot readback still belongs to this backend: the mapped BGRA8 staging rows
+go to libfiles' PNG encoder and the completed bytes are published through the
+shared atomic file service. Encoding and publication happen before
+`Present`, so a failed capture cannot report a stale or partially written frame.

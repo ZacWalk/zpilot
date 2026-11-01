@@ -1,15 +1,20 @@
-// zpilot - Direct3D 11 renderer: HDR scene buffer, additive effect batches,
-// three level bloom chain and a shockwave/CRT composite pass.
+// zpilot - portable scene-renderer contract.
+//
+// The implementation is an explicit Direct3D 11 backend. Keeping this
+// contract free of the backend's headers lets gameplay, geometry and font code
+// remain platform-neutral without weakening the game's renderer.
 #pragma once
-#include <d3d11.h>
-#include <dxgi1_2.h>
-#include <wrl/client.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "Common.h"
+#include "platform.h"
 
 namespace zp {
-
-using Microsoft::WRL::ComPtr;
 
 struct Vtx {
     Vec3 p;
@@ -18,14 +23,16 @@ struct Vtx {
     float glow = 0;
 };
 
+struct RendererMesh;
+
 struct GpuMesh {
-    ComPtr<ID3D11Buffer> vb;
-    UINT count = 0;
+    std::shared_ptr<RendererMesh> backend;
+    uint32_t count = 0;
     // Material vocabulary, fixed when the mesh is built: made things get a
     // highlight, natural things get shader-side rock grain, never both.
     float gloss = 0;
     float grain = 0;
-    bool valid() const { return count > 0; }
+    bool valid() const { return count > 0 && backend != nullptr; }
 };
 
 // A lamp in the world. There are no fixtures in the cavern, so every one of
@@ -50,9 +57,19 @@ struct PostFx {
     Vec4 flash = {};
 };
 
+class RendererD3D;
+
 class Renderer {
 public:
-    bool Init(HWND hwnd, int w, int h);
+    Renderer();
+    ~Renderer();
+    Renderer(Renderer&&) noexcept;
+    Renderer& operator=(Renderer&&) noexcept;
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
+
+    bool Init(const pf::window_frame_ptr& frame, int w, int h);
+    const std::string& Error() const { return error_; }
     void Shutdown();
     void Resize(int w, int h);
 
@@ -84,100 +101,13 @@ public:
     void BeginHud();  // flush world effects, switch to a pixel-space camera
     void EndScene(const PostFx& fx);
     void Present(bool vsync);
-    bool SaveScreenshot(const wchar_t* path);  // call before Present
+    bool SaveScreenshot(const std::filesystem::path& path);  // call before Present
 
 private:
-    struct RT {
-        ComPtr<ID3D11Texture2D> tex;
-        ComPtr<ID3D11RenderTargetView> rtv;
-        ComPtr<ID3D11ShaderResourceView> srv;
-        int w = 0, h = 0;
-    };
-
-    bool CreateShaders();
-    bool CreateBuffers();
-    void CreateSizedTargets();
-    void ReleaseSizedTargets();
-    bool MakeRT(RT& rt, int w, int h, DXGI_FORMAT fmt);
-    void SetViewport(int w, int h);
-    void FullscreenPass(ID3D11PixelShader* ps, const RT* dst, ID3D11ShaderResourceView* const* srvs,
-                        UINT srvCount);
-    void UpdateFrameCB();
-    void FlushPanels();
-    void FlushLines();
-    void FlushGlow();
-    void FlushShards();
-
-    HWND hwnd_ = nullptr;
-    int width_ = 0, height_ = 0;
-
-    ComPtr<ID3D11Device> dev_;
-    ComPtr<ID3D11DeviceContext> ctx_;
-    ComPtr<IDXGISwapChain1> swap_;
-    ComPtr<ID3D11RenderTargetView> backRtv_;
-    ComPtr<ID3D11DepthStencilView> depthDsv_;
-    ComPtr<ID3D11Texture2D> depthTex_;
-    RT scene_;
-    RT bloomA_[3];
-    RT bloomB_[3];
-
-    ComPtr<ID3D11VertexShader> vsSolid_, vsLine_, vsGlow_, vsShard_, vsPanel_, vsFull_;
-    ComPtr<ID3D11PixelShader> psSolid_, psLine_, psGlow_, psShard_, psPanel_, psBright_, psBlur_,
-        psCopy_, psComposite_;
-    ComPtr<ID3D11InputLayout> ilSolid_, ilLine_, ilGlow_, ilShard_, ilPanel_;
-
-    ComPtr<ID3D11Buffer> frameCB_, objectCB_, postCB_;
-    ComPtr<ID3D11Buffer> lineVB_, glowIB_, shardIB_, shardVB_, panelVB_;
-    UINT shardVertexCount_ = 0;
-
-    ComPtr<ID3D11RasterizerState> rsSolid_, rsNoCull_;
-    ComPtr<ID3D11DepthStencilState> dsWrite_, dsTest_, dsOff_;
-    ComPtr<ID3D11BlendState> bsOpaque_, bsAdd_, bsAlpha_;
-    ComPtr<ID3D11SamplerState> smpLinear_;
-
-    struct LineVtx {
-        Vec3 p;
-        Vec3 uvh;
-        Vec4 c;
-    };
-    struct PanelVtx {
-        Vec3 p;
-        Vec2 uv;
-        Vec4 c;
-    };
-    struct GlowInst {
-        Vec4 posSize;
-        Vec4 col;
-        Vec4 shape;
-    };
-    struct ShardInst {
-        Vec4 posSize;
-        Vec4 quat;
-        Vec4 col;
-    };
-
-    std::vector<LineVtx> lines_;
-    std::vector<PanelVtx> panels_;
-    std::vector<GlowInst> glows_;
-    std::vector<ShardInst> shards_;
-
-    struct FrameCBData {
-        Mat4 viewProj;
-        Vec4 camPos;
-        Vec4 camRight;
-        Vec4 camUp;
-        Vec4 ship;
-        Vec4 params;
-        Vec4 plasma;
-        Vec4 sky;
-        Vec4 lightPos[kMaxLights];
-        Vec4 lightCol[kMaxLights];
-    } frame_ = {};
-
-    Light lights_[kMaxLights] = {};
-    float lightScore_[kMaxLights] = {};
-
-    bool hudMode_ = false;
+    std::unique_ptr<RendererD3D> backend_;
+    std::string error_;
+    int width_ = 0;
+    int height_ = 0;
 };
 
 }  // namespace zp

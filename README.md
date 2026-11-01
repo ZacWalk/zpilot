@@ -49,7 +49,7 @@ back towards the star map, <kbd>F1</kbd> shows the manual, <kbd>F3</kbd> mutes,
 
 ## Building
 
-Windows, Direct3D 11, C++17. Requires Visual Studio with the Desktop C++
+Windows, Direct3D 11, C++20. Requires Visual Studio with the Desktop C++
 workload; the vendored [dd](https://github.com/ZacWalk/dd) runtime locates it and
 uses the CMake and Ninja that ship with it.
 

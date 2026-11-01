@@ -22,7 +22,7 @@ MSVC environment itself; do not try to source `vcvars` by hand.
 The repository carries an unmodified [dd](https://github.com/ZacWalk/dd)
 checkout as `dd.ps1` plus `.dd/`; [docs/dd-upstream.json](docs/dd-upstream.json)
 records the vendored hashes. Keep zpilot's dd configuration in `dd.psd1`, keep
-CMake dependency pins in `cmake/dd-dependencies.json`, and use
+application-owned dependency pins in `CMakeLists.txt`, and use
 `.\dd.ps1 commands --json` when you need the project-command list. dd's own
 documentation covers its [CLI/MCP modes](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
 and [built-in commands](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands).
@@ -56,8 +56,9 @@ Three traps:
   on the wrong screen with every frame still lit. That is what the `Mode` (and,
   after the second act's taps, the planet) on each shot catches: the capture
   exits with 100 plus the shot's index. The second act's star-map moves are
-  `kTaps`, real key messages that go down and up inside one frame, so they also
-  cover `Window`'s latch for taps shorter than a frame.
+  `kTaps`, queued input edges that go down and up inside one frame, so they also
+  cover `Window`'s latch for taps shorter than a frame; the fake reactor test
+  covers the same path from platform keyboard callbacks.
 - The capture is the gameplay coverage. A frame going blank, a
   shot on the wrong screen or the run hanging is a real regression, not a flaky
   test.
@@ -69,7 +70,8 @@ Build output lands in `build/release` and `build/debug`, screenshots in the
 
 ## What this project is
 
-A Windows / Direct3D 11 / C++17 game with **no assets of any kind**. Rock, ships,
+A Windows / Direct3D 11 / C++20 game with libdesktop's shared window, input,
+frame-loop and audio infrastructure, and **no assets of any kind**. Rock, ships,
 props, glyphs, music and sound effects are all generated in code from a seed.
 That is a hard constraint and the point of the exercise: when something looks
 flat or repetitive, write a better algorithm, do not add a file.
@@ -86,7 +88,8 @@ flat or repetitive, write a better algorithm, do not add a file.
 | `Geometry.*` | Every mesh in the game, built from the primitives at the top of the file. |
 | `Renderer.*` / `Shaders.h` | HDR scene, additive effects, bloom, CRT composite. |
 | `Font.*` | Stroke font, screen space and world space. |
-| `Synth.*` | Procedural audio. |
+| `Window.*` | libdesktop frame/reactor and game input state. |
+| `Synth.*` | Procedural audio rendered into libdesktop's audio stream. |
 | `Profile.*` | Save file in `%APPDATA%\zpilot\profile.dat` (the capture keeps its own in `shots/`). |
 | `Game.*` | Everything else: modes, flight, props, HUD, star map. |
 

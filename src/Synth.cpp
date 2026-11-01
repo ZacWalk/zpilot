@@ -1,8 +1,6 @@
 #include "Synth.h"
 
-#include <xaudio2.h>
-
-#pragma comment(lib, "xaudio2.lib")
+#include <chrono>
 
 namespace zp {
 
@@ -11,18 +9,10 @@ namespace zp {
 static const float kDuckDepth = 0.30f;
 static const float kDuckRelease = 0.11f;  // seconds
 
-struct Synth::CallbackImpl : public IXAudio2VoiceCallback {
-    HANDLE ev = nullptr;
-    void __stdcall OnVoiceProcessingPassStart(UINT32) override {}
-    void __stdcall OnVoiceProcessingPassEnd() override {}
-    void __stdcall OnStreamEnd() override {}
-    void __stdcall OnBufferStart(void*) override {}
-    void __stdcall OnBufferEnd(void*) override {
-        if (ev) SetEvent(ev);
-    }
-    void __stdcall OnLoopEnd(void*) override {}
-    void __stdcall OnVoiceError(void*, HRESULT) override {}
-};
+int16_t AudioSampleToPcm16(const float sample) {
+    const float finite = std::isfinite(sample) ? sample : 0.0f;
+    return static_cast<int16_t>(lrintf(clampf(finite, -1.0f, 1.0f) * 32767.0f));
+}
 
 static inline float noiseFrom(uint32_t& s) {
     s ^= s << 13;
@@ -48,30 +38,21 @@ static inline float polyBlep(float t, float dt) {
 }
 
 bool Synth::Init() {
+    audioFailed_.store(false);
+    pendingBlock_ = false;
     voices_.resize(kMaxVoices);
     for (int i = 0; i < kBlocks; ++i) blocks_[i].assign(kBlockFrames * 2, 0.0f);
+    pcm_.assign(kBlockFrames * 2, 0);
     delayL_.assign(kDelaySamples, 0.0f);
     delayR_.assign(kDelaySamples, 0.0f);
 
-    if (FAILED(XAudio2Create(&xaudio_, 0, XAUDIO2_DEFAULT_PROCESSOR))) return false;
-    if (FAILED(xaudio_->CreateMasteringVoice(&master_))) return false;
-
-    WAVEFORMATEX wf = {};
-    wf.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-    wf.nChannels = 2;
-    wf.nSamplesPerSec = kSampleRate;
-    wf.wBitsPerSample = 32;
-    wf.nBlockAlign = (wf.wBitsPerSample / 8) * wf.nChannels;
-    wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-
-    bufferEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    callback_ = new CallbackImpl();
-    callback_->ev = (HANDLE)bufferEvent_;
-
-    if (FAILED(xaudio_->CreateSourceVoice(&voice_, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, callback_)))
+    if (!pf::sound_init()) return false;
+    stream_ = pf::create_audio_stream(kSampleRate, 2, kBlocks);
+    if (!stream_) {
+        pf::sound_shutdown();
         return false;
-    voice_->SetVolume(1.0f);
-    voice_->Start(0);
+    }
+    stream_->set_volume(1.0f);
 
     running_.store(true);
     thread_ = std::thread(&Synth::ThreadEntry, this);
@@ -80,49 +61,48 @@ bool Synth::Init() {
 
 void Synth::Shutdown() {
     if (running_.exchange(false)) {
-        if (bufferEvent_) SetEvent((HANDLE)bufferEvent_);
         if (thread_.joinable()) thread_.join();
     }
-    if (voice_) {
-        voice_->Stop(0);
-        voice_->DestroyVoice();
-        voice_ = nullptr;
-    }
-    if (master_) {
-        master_->DestroyVoice();
-        master_ = nullptr;
-    }
-    if (xaudio_) {
-        xaudio_->Release();
-        xaudio_ = nullptr;
-    }
-    if (bufferEvent_) {
-        CloseHandle((HANDLE)bufferEvent_);
-        bufferEvent_ = nullptr;
-    }
-    delete callback_;
-    callback_ = nullptr;
+    if (stream_) stream_->stop();
+    stream_.reset();
+    pf::sound_shutdown();
 }
 
 void Synth::ThreadEntry(Synth* s) { s->ThreadLoop(); }
 
 void Synth::ThreadLoop() {
     while (running_.load()) {
-        XAUDIO2_VOICE_STATE state = {};
-        voice_->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-        while (state.BuffersQueued < (UINT32)kBlocks && running_.load()) {
+        if (!stream_) break;
+        if (!pendingBlock_) {
+            if (!stream_->can_write()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
             std::vector<float>& blk = blocks_[blockIndex_];
             RenderBlock(blk.data(), kBlockFrames);
-
-            XAUDIO2_BUFFER buf = {};
-            buf.AudioBytes = (UINT32)(blk.size() * sizeof(float));
-            buf.pAudioData = reinterpret_cast<const BYTE*>(blk.data());
-            voice_->SubmitSourceBuffer(&buf);
-
-            blockIndex_ = (blockIndex_ + 1) % kBlocks;
-            voice_->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+            for (size_t i = 0; i < blk.size(); ++i)
+                pcm_[i] = AudioSampleToPcm16(blk[i]);
+            pendingBlock_ = true;
         }
-        WaitForSingleObject((HANDLE)bufferEvent_, 20);
+
+        if (stream_->write(pcm_)) {
+            blockIndex_ = (blockIndex_ + 1) % kBlocks;
+            pendingBlock_ = false;
+            continue;
+        }
+
+        // A full queue is a normal producer race: retain the rendered block so
+        // the synthesis clock advances only when the stream accepts it. A
+        // refusal while the queue reports room is a broken endpoint; stop it
+        // and fall back to silent gameplay rather than spin or discard audio.
+        if (!stream_->can_write()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        stream_->stop();
+        stream_.reset();
+        audioFailed_.store(true);
+        break;
     }
 }
 

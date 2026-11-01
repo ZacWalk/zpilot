@@ -2,15 +2,14 @@
 // files, no samples. Includes a generative sequencer for the soundtrack.
 #pragma once
 #include <atomic>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include "Common.h"
-
-struct IXAudio2;
-struct IXAudio2MasteringVoice;
-struct IXAudio2SourceVoice;
+#include "platform.h"
 
 namespace zp {
 
@@ -32,6 +31,11 @@ enum SfxId {
     SFX_COUNT
 };
 
+// Converts one renderer-independent sample to the shared stream's signed PCM16
+// contract. The original float mixer clips before rounding, so -1 and +1 map
+// symmetrically to the largest representable magnitude it emitted.
+int16_t AudioSampleToPcm16(float sample);
+
 class Synth {
 public:
     bool Init();
@@ -43,6 +47,7 @@ public:
     void SetMusic(int intensity, uint32_t seed);  // 0 menu, 1 calm, 2 alert, 3 meltdown
     void SetMuted(bool m) { muted_.store(m); }
     bool Muted() const { return muted_.load(); }
+    bool AudioFailed() const { return audioFailed_.load(); }
 
 private:
     struct Voice {
@@ -76,15 +81,12 @@ private:
     static void ThreadEntry(Synth* s);
     void ThreadLoop();
 
-    IXAudio2* xaudio_ = nullptr;
-    IXAudio2MasteringVoice* master_ = nullptr;
-    IXAudio2SourceVoice* voice_ = nullptr;
-    void* bufferEvent_ = nullptr;
-    struct CallbackImpl;
-    CallbackImpl* callback_ = nullptr;
+    pf::audio_stream_ptr stream_;
+    std::vector<int16_t> pcm_;
 
     std::thread thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> audioFailed_{false};
     std::atomic<bool> muted_{false};
     std::atomic<float> thrust_{0}, tractor_{0}, tension_{0};
     std::atomic<int> intensity_{1};
@@ -103,6 +105,7 @@ private:
     std::vector<Voice> voices_;
     std::vector<float> blocks_[kBlocks];
     int blockIndex_ = 0;
+    bool pendingBlock_ = false;
 
     // Continuous engine / tractor voices live outside the pool.
     float thrustPhase_ = 0, thrustLp_ = 0, thrustLevel_ = 0, rumblePhase_ = 0;
