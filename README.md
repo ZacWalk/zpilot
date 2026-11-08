@@ -53,6 +53,10 @@ Windows, Direct3D 11, C++20. Requires Visual Studio with the Desktop C++
 workload; the vendored [dd](https://github.com/ZacWalk/dd) runtime locates it and
 uses the CMake and Ninja that ship with it.
 
+zpilot uses libdesktop's platform application lifecycle, event pump and
+window-input services, fullscreen handling and audio; the application owns its
+game frame loop, Direct3D 11 renderer and generated assets.
+
 ```powershell
 .\dd.ps1 build        # both configurations
 .\dd.ps1 test         # build and run the suite

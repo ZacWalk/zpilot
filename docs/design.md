@@ -367,20 +367,21 @@ A change that breaks any of these is wrong regardless of how it looks:
 
 ## 12. Platform and renderer boundary
 
-The window, input, frame loop, DPI/fullscreen behaviour and audio endpoint come
-from libdesktop's platform-neutral `pf::` layer. `Window` translates those
-events into the game's key states and keeps the one-frame tap latch; focus loss
-clears held input before the next simulation frame. The scripted capture uses
-the same input seam, including its short taps, so the three capture acts remain
-coverage rather than a second game loop.
+`platform::app`/`platform::run` provide lifecycle; `platform::pump_events` and
+`platform::window` provide event pumping, window/input, DPI and fullscreen, while
+media services provide audio. `Application::main_loop` owns the game frame loop,
+and `Window` translates callbacks into the game's key states and latches one-frame
+taps; focus loss clears held input before the next simulation frame. The scripted
+capture uses the same input seam, including its short taps, so the three capture
+acts remain coverage rather than a second game loop.
 
 The scene renderer is deliberately **not** libdesktop-render. zpilot's HDR scene
 buffer, additive batches, three-level bloom chain, shockwave and CRT composite
 are the game's visual language and remain an explicit Direct3D 11 backend.
-Only that backend asks libdesktop's Windows interop seam for the native swap-chain
-target. No public game or portable header exposes a Windows handle, and no
-shared desktop renderer replaces the procedural meshes, shaders, post effects or
-deterministic capture output.
+Only the Direct3D backend calls `platform::window::native_handle()` to obtain
+the HWND for its swap chain. No public game or portable header exposes a
+Windows handle, and no shared desktop renderer replaces the procedural meshes,
+shaders, post effects or deterministic capture output.
 
 Screenshot readback still belongs to this backend: the mapped BGRA8 staging rows
 go to libfiles' PNG encoder and the completed bytes are published through the

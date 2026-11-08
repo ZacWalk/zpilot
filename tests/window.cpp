@@ -1,78 +1,62 @@
 #include "../src/Window.h"
 
+#include <any>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 namespace {
 
-class FakeFrame final : public pf::window_frame {
+class FakeWindow final : public platform::window {
 public:
-    pf::frame_reactor_ptr reactor;
-    bool closed = false;
+    std::any native_handle() const override { return {}; }
+    platform::window_kind kind() const override { return platform::window_kind::app; }
+    void destroy() override { destroyed = true; }
+
+    core::recti bounds() const override { return {0, 0, 1600, 900}; }
+    void set_bounds(core::recti value, bool visible) override {
+        bounds_ = value;
+        visible_ = visible;
+    }
+    core::sizei client_extent() const override { return {1600, 900}; }
+    void show(bool value) override { visible_ = value; }
+    bool is_visible() const override { return visible_; }
+    void enable(bool value) override { enabled_ = value; }
+    bool is_enabled() const override { return enabled_; }
+    void set_title(std::string_view value) override { title_ = value; }
+    std::string title() const override { return title_; }
+
+    void focus() override { focused_ = true; }
+    bool has_focus() const override { return focused_; }
+    void capture(bool) override {}
+    void set_cursor(platform::cursor) override {}
+    core::pointi cursor_location() const override { return {}; }
+    core::pointi client_to_screen(core::pointi point) const override { return point; }
+    core::pointi screen_to_client(core::pointi point) const override { return point; }
+    double scale() const override { return 1.0; }
+    void set_resize_scale(double) override {}
+
+    void invalidate(core::recti = {}) override {}
+    void update_now() override {}
+    void scroll(int, int, core::recti) override {}
+    void start_timer(uint32_t, uint32_t) override {}
+    void stop_timer(uint32_t) override {}
+    bool is_minimized() const override { return false; }
+    bool is_maximized() const override { return false; }
+    bool is_occluded() const override { return false; }
+    void sys_command(platform::sys_command_type) override {}
+    void full_screen(bool value) override { fullscreen = value; }
+    bool is_full_screen() const override { return fullscreen; }
+    void set_text_input(bool, core::recti) override {}
+    void save_placement(const platform::setting_file_ptr&, std::string_view) override {}
+
+    core::recti bounds_;
+    std::string title_;
+    bool visible_ = true;
+    bool enabled_ = true;
+    bool focused_ = true;
     bool fullscreen = false;
-
-    void set_reactor(pf::frame_reactor_ptr value) override { reactor = std::move(value); }
-    void notify_size() override {}
-    pf::irect get_client_rect() const override { return {0, 0, 1600, 900}; }
-    void invalidate() override {}
-    void invalidate_rect(const pf::irect&) override {}
-    void set_focus() override {}
-    bool has_focus() const override { return true; }
-    void set_capture() override {}
-    void release_capture() override {}
-    uint32_t set_timer(uint32_t id, uint32_t) override { return id; }
-    void kill_timer(uint32_t) override {}
-    pf::ipoint screen_to_client(pf::ipoint point) const override { return point; }
-    void set_cursor_shape(pf::cursor_shape) override {}
-    void move_window(const pf::irect&) override {}
-    void show(bool) override {}
-    bool is_visible() const override { return true; }
-    void set_text(std::string_view) override {}
-    std::string text_from_clipboard() override { return {}; }
-    bool text_to_clipboard(std::string_view) override { return true; }
-    placement get_placement() const override { return {}; }
-    void set_placement(const placement&) override {}
-    void set_minimum_client_size(pf::isize) override {}
-    void set_fullscreen(bool value) override { fullscreen = value; }
-    bool is_fullscreen() const override { return fullscreen; }
-    void toggle_fullscreen() override { fullscreen = !fullscreen; }
-    void track_mouse_leave() override {}
-    bool is_key_down(unsigned int) const override { return false; }
-    bool is_key_down_async(unsigned int) const override { return false; }
-    pf::window_frame_ptr create_child(std::string_view, uint32_t, pf::color_t) const & override {
-        return nullptr;
-    }
-    void close() override { closed = true; }
-    int message_box(std::string_view, std::string_view, uint32_t) override { return 0; }
-    void present_pixels(const uint32_t*, int, int) override {}
-    void set_menu(std::vector<pf::menu_command>) override {}
-    std::unique_ptr<pf::measure_context> create_measure_context() const override { return nullptr; }
-    void show_popup_menu(const std::vector<pf::menu_command>&, const pf::ipoint&) override {}
-    double get_dpi_scale() const override { return 1.0; }
-    void accept_drop_files(bool) override {}
-    pf::toolbar_frame_ptr create_address_bar(const pf::address_bar_config&) override { return nullptr; }
-
-    void Key(uint32_t vk, bool down, bool repeat = false) {
-        if (!reactor) throw std::runtime_error("fake frame has no reactor");
-        pf::keyboard_params p;
-        p.vk = vk;
-        p.repeat = repeat;
-        reactor->handle_keyboard(shared_from_this(), down ? pf::keyboard_message_type::key_down
-                                                         : pf::keyboard_message_type::key_up, p);
-    }
-
-    void LostFocus() {
-        if (!reactor) throw std::runtime_error("fake frame has no reactor");
-        pf::message_params p;
-        reactor->handle_message(shared_from_this(), pf::message_type::kill_focus, p);
-    }
-
-    std::shared_ptr<FakeFrame> shared_from_this() {
-        return self.lock();
-    }
-
-    std::weak_ptr<FakeFrame> self;
+    bool destroyed = false;
 };
 
 }  // namespace
@@ -84,53 +68,56 @@ int RunWindowChecks() {
         if (!ok) throw std::runtime_error(message);
     };
 
-    auto frame = std::make_shared<FakeFrame>();
-    frame->self = frame;
+    auto frame = std::make_shared<FakeWindow>();
     zp::Window window;
-    check(window.Attach(frame), "window attaches to a shared frame");
+    check(window.Attach(frame), "window attaches to a shared platform window");
+    const auto events = window.EventSink();
+    check(events != nullptr, "window exposes its platform event sink");
 
     window.NewFrame();
-    frame->Key(pf::platform_key::Right, true);
+    events->key_down(static_cast<int>(platform::keys::RIGHT), {}, false);
     check(window.Down(zp::KEY_RIGHT) && window.Pressed(zp::KEY_RIGHT),
           "fresh key down is visible and pressed");
     window.NewFrame();
+    events->key_down(static_cast<int>(platform::keys::RIGHT), {}, false);
     check(window.Down(zp::KEY_RIGHT) && !window.Pressed(zp::KEY_RIGHT),
           "held key is not pressed twice");
 
-    frame->Key(pf::platform_key::Right, false);
+    events->key_up(static_cast<int>(platform::keys::RIGHT), {}, false);
     check(window.Released(zp::KEY_RIGHT), "key up is released in the same frame");
 
     window.NewFrame();
-    frame->Key(pf::platform_key::Left, true);
-    frame->Key(pf::platform_key::Left, false);
+    events->key_down(static_cast<int>(platform::keys::LEFT), {}, false);
+    events->key_up(static_cast<int>(platform::keys::LEFT), {}, false);
     check(!window.Down(zp::KEY_LEFT) && window.Pressed(zp::KEY_LEFT),
           "a down/up tap is latched for the frame");
     window.NewFrame();
     check(!window.Pressed(zp::KEY_LEFT), "tap latch expires at the next frame");
 
-    frame->Key('Q', true);
-    frame->LostFocus();
-    check(!window.Down(zp::KEY_SHIELD) && !window.Pressed(zp::KEY_SHIELD),
-          "focus loss clears held and latched input");
-    window.ToggleFullscreen();
-    check(frame->fullscreen, "fullscreen toggles through the shared frame");
-    window.ToggleFullscreen();
-    check(!frame->fullscreen, "fullscreen toggles back through the shared frame");
+    platform::key_state alt;
+    alt.alt = true;
+    check(!events->key_down(static_cast<int>(platform::keys::SPACE), alt, true) &&
+              window.Down(zp::KEY_FIRE),
+          "system keys update gameplay state but remain unhandled");
+    check(!events->key_up(static_cast<int>(platform::keys::SPACE), alt, true) &&
+              !window.Down(zp::KEY_FIRE),
+          "system key release remains available to Windows");
 
     window.NewFrame();
     check(!window.QueueTap(zp::KEY_RIGHT) && !window.Pressed(zp::KEY_RIGHT),
-          "synthetic taps require the shared backend event hook");
+          "synthetic taps require a native platform window message queue");
+
+    events->key_down('Q', {}, false);
+    events->focus_changed(false);
+    check(!window.Down(zp::KEY_SHIELD) && !window.Pressed(zp::KEY_SHIELD),
+          "focus loss clears held and latched input");
+    window.ToggleFullscreen();
+    check(frame->fullscreen, "fullscreen toggles through the platform window");
+    window.ToggleFullscreen();
+    check(!frame->fullscreen, "fullscreen toggles back through the platform window");
+
     window.Destroy();
-    check(!frame->reactor, "destroy detaches the reactor before the owner dies");
+    check(frame->destroyed, "destroy releases the native platform window");
+    check(window.EventSink() == nullptr, "destroy releases the event sink");
     return checks;
 }
-
-// libdesktop-core contains its WinMain in the same static archive as the
-// neutral event pump. The headless unit executable never enters that path, but
-// its callback symbols still have to be satisfied at link time.
-app_init_result app_init(const pf::window_frame_ptr&, std::span<const std::string_view>) {
-    return {false, 0};
-}
-
-void app_idle() {}
-void app_destroy() {}

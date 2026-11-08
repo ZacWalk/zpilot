@@ -1,4 +1,5 @@
 #include "../src/Profile.h"
+#include <libdesktop/platform.h>
 
 #include <filesystem>
 #include <fstream>
@@ -37,11 +38,11 @@ int main()
     }
     int result = 0;
     try {
-        zp::Profile::UseDefaultRootForTests(pf::file_path(root.string()));
+        zp::Profile::UseDefaultRootForTests(core::folder_path(root.string()));
         const auto legacy = root / "z-pilot";
         const auto legacyFile = legacy / "profile.dat";
         const auto currentFile = root / "zpilot" / "profile.dat";
-        zp::Profile::UseFolder(pf::file_path(legacy.string()));
+        zp::Profile::UseFolder(core::folder_path(legacy.string()));
         zp::Profile saved;
         saved.Submit(0, 73, 2, true);
         saved.Save();
@@ -83,28 +84,28 @@ int main()
             broken << "invalid";
         }
         const auto unchanged = Read(currentFile);
-        pf::test_set_atomic_file_failure(pf::atomic_file_test_failure::stage_collision);
+        platform::test_set_atomic_file_failure(platform::atomic_file_test_failure::stage_collision);
         current.Save();
-        pf::test_set_atomic_file_failure(pf::atomic_file_test_failure::none);
+        platform::test_set_atomic_file_failure(platform::atomic_file_test_failure::none);
         Check(Read(currentFile) != unchanged,
               "an atomic stage collision must retry without losing the live profile");
         {
             std::ofstream broken(currentFile, std::ios::binary | std::ios::trunc);
             broken << "invalid";
         }
-        for (const auto failure : {pf::atomic_file_test_failure::open,
-                                   pf::atomic_file_test_failure::write,
-                                   pf::atomic_file_test_failure::flush,
-                                   pf::atomic_file_test_failure::commit}) {
-            pf::test_set_atomic_file_failure(failure);
+        for (const auto failure : {platform::atomic_file_test_failure::open,
+                                   platform::atomic_file_test_failure::write,
+                                   platform::atomic_file_test_failure::flush,
+                                   platform::atomic_file_test_failure::commit}) {
+            platform::test_set_atomic_file_failure(failure);
             current.Save();
-            pf::test_set_atomic_file_failure(pf::atomic_file_test_failure::none);
+            platform::test_set_atomic_file_failure(platform::atomic_file_test_failure::none);
             Check(Read(currentFile) == unchanged,
                   "a failed atomic publish must preserve the live profile");
         }
 
         const auto isolated = root / "capture";
-        zp::Profile::UseFolder(pf::file_path(isolated.string()));
+        zp::Profile::UseFolder(core::folder_path(isolated.string()));
         current.Load();
         Check(current.At(0).bestScore == 0, "an isolated capture must not import the player's legacy profile");
         current.Submit(0, 42, 1, false);
@@ -113,12 +114,12 @@ int main()
         Check(Read(currentFile) == "invalid", "an isolated save must not change the new player profile");
         Check(Read(legacyFile) == original, "an isolated save must not change the old player profile");
 
-        const pf::file_path unicodeFolder(root.string() + "\\capture-\xC3\xA9");
+        const core::folder_path unicodeFolder(root.string() + "\\capture-\xC3\xA9");
         zp::Profile::UseFolder(unicodeFolder);
         zp::Profile unicode;
         unicode.Submit(0, 51, 1, false);
         unicode.Save();
-        Check(unicodeFolder.combine("profile.dat").exists(),
+        Check(platform::file_attributes(unicodeFolder.combine_file("profile.dat")).exists(),
               "shared file paths preserve non-ASCII capture folders");
 
         zp::Profile::UseFolder({});

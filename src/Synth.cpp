@@ -46,10 +46,10 @@ bool Synth::Init() {
     delayL_.assign(kDelaySamples, 0.0f);
     delayR_.assign(kDelaySamples, 0.0f);
 
-    if (!pf::sound_init()) return false;
-    stream_ = pf::create_audio_stream(kSampleRate, 2, kBlocks);
+    if (!platform::sound_init()) return false;
+    stream_ = platform::create_audio_stream(kSampleRate, 2, kBlocks);
     if (!stream_) {
-        pf::sound_shutdown();
+        platform::sound_shutdown();
         return false;
     }
     stream_->set_volume(1.0f);
@@ -65,7 +65,7 @@ void Synth::Shutdown() {
     }
     if (stream_) stream_->stop();
     stream_.reset();
-    pf::sound_shutdown();
+    platform::sound_shutdown();
 }
 
 void Synth::ThreadEntry(Synth* s) { s->ThreadLoop(); }

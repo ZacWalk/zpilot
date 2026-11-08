@@ -11,14 +11,14 @@ namespace zp {
 static const uint32_t kMagic = 0x5A50524Fu;  // 'ZPRO'
 static const uint32_t kFileVersion = 2;
 
-static pf::file_path g_folder;
-static pf::file_path g_defaultRootForTests;
+static core::folder_path g_folder;
+static core::folder_path g_defaultRootForTests;
 
-void Profile::UseFolder(const pf::file_path& folder) {
+void Profile::UseFolder(const core::folder_path& folder) {
     g_folder = folder;
 }
 
-void Profile::UseDefaultRootForTests(const pf::file_path& root) {
+void Profile::UseDefaultRootForTests(const core::folder_path& root) {
     g_defaultRootForTests = root;
 }
 
@@ -30,7 +30,7 @@ int MedalFor(int percent) {
 }
 
 static std::string LastPlatformError() {
-    const std::string error = pf::platform_last_error_message();
+    const std::string error = platform::last_error_message();
     return error.empty() ? "unknown platform error" : error;
 }
 
@@ -43,32 +43,32 @@ static void ProfileError(const char* operation, const std::string_view detail) {
         message += detail;
         message += ')';
     }
-    pf::debug_trace(message);
+    core::trace(message);
 }
 
-static bool ProfilePath(pf::file_path* out, const bool legacy = false) {
-    if (!g_folder.empty()) {
-        *out = g_folder.combine("profile.dat");
+static bool ProfilePath(core::file_path* out, const bool legacy = false) {
+    if (!g_folder.is_empty()) {
+        *out = g_folder.combine_file("profile.dat");
         return true;
     }
 
-    pf::file_path root = g_defaultRootForTests;
-    if (root.empty()) root = pf::roaming_app_data_path();
-    if (root.empty()) {
+    core::folder_path root = g_defaultRootForTests;
+    if (root.is_empty()) root = platform::known_path(platform::known_folder::roaming_app_data);
+    if (root.is_empty()) {
         ProfileError("path", "roaming application-data folder unavailable");
         return false;
     }
 
-    *out = root.combine(legacy ? "z-pilot" : "zpilot").combine("profile.dat");
+    *out = root.combine(legacy ? "z-pilot" : "zpilot").combine_file("profile.dat");
     return true;
 }
 
-static bool ReadExact(const pf::file_handle_ptr& file, uint8_t* data, const uint32_t bytes) {
+static bool ReadExact(const platform::file_ptr& file, uint8_t* data, const uint32_t bytes) {
     uint32_t offset = 0;
     while (offset < bytes) {
-        uint32_t read = 0;
-        if (!file->read(data + offset, bytes - offset, &read) || read == 0) return false;
-        offset += read;
+        const uint64_t read = file->read(data + offset, bytes - offset);
+        if (read == 0) return false;
+        offset += static_cast<uint32_t>(read);
     }
     return true;
 }
@@ -76,21 +76,22 @@ static bool ReadExact(const pf::file_handle_ptr& file, uint8_t* data, const uint
 void Profile::Load() {
     for (auto& r : rows_) r = PlanetRecord();
 
-    pf::file_path path;
+    core::file_path path;
     if (!ProfilePath(&path)) return;
 
-    auto opened = pf::open_for_read_result(path);
-    if (!opened.success() && opened.result.code == pf::file_error::no_such_file &&
-        g_folder.empty()) {
+    auto opened = platform::open_file(path, platform::file_open_mode::read);
+    if (!opened && platform::file_attributes(path).presence == platform::file_presence::not_found &&
+        g_folder.is_empty()) {
         if (!ProfilePath(&path, true)) return;
-        opened = pf::open_for_read_result(path);
+        opened = platform::open_file(path, platform::file_open_mode::read);
     }
-    if (!opened.success()) {
-        if (opened.result.code != pf::file_error::no_such_file)
-            ProfileError("read", opened.result.message);
+    if (!opened) {
+        const auto attributes = platform::file_attributes(path);
+        if (attributes.presence != platform::file_presence::not_found)
+            ProfileError("read", LastPlatformError());
         return;
     }
-    const auto& file = opened.file;
+    const auto& file = opened;
 
     constexpr uint32_t kHeaderBytes = sizeof(uint32_t) * 4;
     constexpr uint32_t kRecordBytes = sizeof(PlanetRecord) * kPlanetCount;
@@ -140,11 +141,13 @@ void Profile::Load() {
 }
 
 void Profile::Save() const {
-    pf::file_path path;
+    core::file_path path;
     if (!ProfilePath(&path)) return;
 
-    if (!pf::platform_create_directory(path.folder())) {
-        ProfileError("directory creation", LastPlatformError());
+    const auto folder = path.folder();
+    const auto created = platform::create_folder(folder);
+    if (created.failed() && !platform::is_directory(folder)) {
+        ProfileError("directory creation", created.error_message);
         return;
     }
 
@@ -163,24 +166,24 @@ void Profile::Save() const {
     write_u32(kPlanetCount);
     std::memcpy(bytes.data() + offset, rows_, sizeof(rows_));
 
-    const auto opened = pf::create_atomic_file_writer_result(path);
+    const auto opened = platform::create_atomic_file_writer_result(path);
     if (!opened.success()) {
-        ProfileError("staging", opened.result.message);
+        ProfileError("staging", opened.result.error_message);
         return;
     }
     const auto writer = opened.writer;
     const auto written = writer->write(std::span<const uint8_t>(bytes.data(), bytes.size()));
-    if (!written) {
-        ProfileError("write", written.message);
+    if (!written.success()) {
+        ProfileError("write", written.error_message);
         return;
     }
     const auto flushed = writer->flush();
-    if (!flushed) {
-        ProfileError("flush", flushed.message);
+    if (!flushed.success()) {
+        ProfileError("flush", flushed.error_message);
         return;
     }
     const auto committed = writer->commit();
-    if (!committed) ProfileError("replacement", committed.message);
+    if (committed.failed()) ProfileError("replacement", committed.error_message);
 }
 
 bool Profile::Submit(int planet, int percent, int relics, bool completed) {

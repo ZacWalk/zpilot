@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "Common.h"
-#include "platform.h"
+#include <libdesktop/platform.h>
 
 namespace zp {
 
@@ -68,7 +68,7 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    bool Init(const pf::window_frame_ptr& frame, int w, int h);
+    bool Init(const platform::window_ptr& frame, int w, int h);
     const std::string& Error() const { return error_; }
     void Shutdown();
     void Resize(int w, int h);

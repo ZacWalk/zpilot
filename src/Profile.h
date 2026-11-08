@@ -3,7 +3,7 @@
 #pragma once
 
 #include "Common.h"
-#include "platform.h"
+#include <libdesktop/platform.h>
 
 namespace zp {
 
@@ -27,10 +27,10 @@ public:
     // Keeps the record in `folder` instead of the shared roaming
     // application-data zpilot folder. The scripted capture flies real runs,
     // and they must not land in the player's log.
-    static void UseFolder(const pf::file_path& folder);
+    static void UseFolder(const core::folder_path& folder);
     // Isolated fixture root for the profile migration suite; production leaves
-    // this empty and uses pf::roaming_app_data_path().
-    static void UseDefaultRootForTests(const pf::file_path& root);
+    // this empty and uses platform::known_path(roaming_app_data).
+    static void UseDefaultRootForTests(const core::folder_path& root);
 
     void Load();
     void Save() const;

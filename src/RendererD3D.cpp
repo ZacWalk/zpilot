@@ -6,7 +6,7 @@
 #include <libfiles/encode.h>
 
 #include "Shaders.h"
-#include "platform_win_interop.h"
+#include <windows.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -35,20 +35,31 @@ static ComPtr<ID3DBlob> CompileShader(const char* prefix, const char* src, const
         msg += "):\n";
         if (err) msg += (const char*)err->GetBufferPointer();
         if (error) *error = msg;
-        pf::debug_trace(msg);
+        core::trace(msg);
         return nullptr;
     }
     return code;
 }
 
-bool RendererD3D::Init(const pf::window_frame_ptr& frame, int w, int h) {
+bool RendererD3D::Init(const platform::window_ptr& window, int w, int h) {
     error_.clear();
-    const uintptr_t nativeWindow = pf::platform_win::native_window_handle(frame);
+    if (!window) {
+        error_ = "Direct3D 11 renderer: no native window target";
+        return false;
+    }
+
+    HWND nativeWindow = nullptr;
+    try {
+        nativeWindow = std::any_cast<HWND>(window->native_handle());
+    } catch (const std::bad_any_cast&) {
+        error_ = "Direct3D 11 renderer: unsupported native window handle";
+        return false;
+    }
     if (!nativeWindow) {
         error_ = "Direct3D 11 renderer: no native window target";
         return false;
     }
-    nativeWindow_ = nativeWindow;
+    nativeWindow_ = reinterpret_cast<uintptr_t>(nativeWindow);
     width_ = w;
     height_ = h;
 
@@ -97,12 +108,12 @@ bool RendererD3D::Init(const pf::window_frame_ptr& frame, int w, int h) {
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     sd.Scaling = DXGI_SCALING_STRETCH;
     if (FAILED(factory->CreateSwapChainForHwnd(
-            dev_.Get(), reinterpret_cast<HWND>(nativeWindow), &sd, nullptr, nullptr, &swap_)))
+            dev_.Get(), nativeWindow, &sd, nullptr, nullptr, &swap_)))
     {
         error_ = "Direct3D 11 renderer: swap-chain creation failed";
         return false;
     }
-    factory->MakeWindowAssociation(reinterpret_cast<HWND>(nativeWindow), DXGI_MWA_NO_ALT_ENTER);
+    factory->MakeWindowAssociation(nativeWindow, DXGI_MWA_NO_ALT_ENTER);
 
     if (!CreateShaders()) return false;
     if (!CreateBuffers()) return false;
@@ -755,48 +766,49 @@ void RendererD3D::Present(bool vsync) {
 
 namespace {
 
-pf::file_path SharedPath(const std::filesystem::path& path) {
+core::file_path SharedPath(const std::filesystem::path& path) {
     const auto utf8 = path.u8string();
-    return pf::file_path(std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size()));
+    return core::file_path(std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size()));
 }
 
 bool PublishPng(const std::filesystem::path& path, const std::vector<uint8_t>& bytes) {
-    const pf::file_path target = SharedPath(path);
-    const pf::file_path folder = target.folder();
-    if (!folder.empty() && !pf::platform_create_directory(folder)) {
-        pf::debug_trace("zpilot: screenshot directory creation failed: " +
-                        pf::platform_last_error_message());
-        return false;
+    const core::file_path target = SharedPath(path);
+    const core::folder_path folder = target.folder();
+    if (!folder.is_empty()) {
+        const auto created = platform::create_folder(folder);
+        if (created.failed() && !platform::is_directory(folder)) {
+            core::trace("zpilot: screenshot directory creation failed: " + created.error_message);
+            return false;
+        }
     }
 
-    const auto opened = pf::create_atomic_file_writer_result(target);
+    const auto opened = platform::create_atomic_file_writer_result(target);
     if (!opened.success()) {
-        pf::debug_trace("zpilot: screenshot staging failed: " + opened.result.message);
+        core::trace("zpilot: screenshot staging failed: " + opened.result.error_message);
         return false;
     }
     const auto writer = opened.writer;
     const auto written = writer->write(std::span<const uint8_t>(bytes.data(), bytes.size()));
-    if (!written) {
-        pf::debug_trace("zpilot: screenshot staging write failed: " + written.message);
+    if (written.failed()) {
+        core::trace("zpilot: screenshot staging write failed: " + written.error_message);
         return false;
     }
     const auto flushed = writer->flush();
-    if (!flushed) {
-        pf::debug_trace("zpilot: screenshot flush failed: " + flushed.message);
+    if (flushed.failed()) {
+        core::trace("zpilot: screenshot flush failed: " + flushed.error_message);
         return false;
     }
     const auto committed = writer->commit();
-    if (!committed) {
-        pf::debug_trace("zpilot: screenshot publication failed: " + committed.message);
+    if (committed.failed()) {
+        core::trace("zpilot: screenshot publication failed: " + committed.error_message);
         return false;
     }
-    const auto published = pf::query_file(target);
-    if (!published.found()) {
-        if (published.status == pf::file_query_status::failed)
-            pf::debug_trace("zpilot: screenshot publication query failed: " +
-                            published.error.message);
+    const auto published = platform::file_attributes(target);
+    if (!published.exists()) {
+        if (published.presence == platform::file_presence::unknown)
+            core::trace("zpilot: screenshot publication query failed");
         else
-            pf::debug_trace("zpilot: screenshot publication reported success but file is missing");
+            core::trace("zpilot: screenshot publication reported success but file is missing");
         return false;
     }
     return true;
@@ -843,17 +855,17 @@ bool RendererD3D::SaveScreenshot(const std::filesystem::path& path) {
             };
             auto encoded = libfiles::encode_png(image, 1, {});
             for (const auto& note : encoded.notes)
-                pf::debug_trace("zpilot: PNG encoder: " + note);
+                core::trace("zpilot: PNG encoder: " + note);
             if (encoded.data.empty()) {
-                pf::debug_trace("zpilot: PNG encode returned no data");
+                core::trace("zpilot: PNG encode returned no data");
                 return false;
             }
             png = std::move(encoded.data);
         } catch (const libfiles::encode_error& error) {
-            pf::debug_trace(std::string("zpilot: PNG encode failed: ") + error.what());
+            core::trace(std::string("zpilot: PNG encode failed: ") + error.what());
             return false;
         } catch (const std::bad_alloc&) {
-            pf::debug_trace("zpilot: PNG encode ran out of memory");
+            core::trace("zpilot: PNG encode ran out of memory");
             return false;
         }
     }

@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "Common.h"
-#include "platform.h"
+#include <libdesktop/platform.h>
 
 namespace zp {
 
@@ -81,7 +81,7 @@ private:
     static void ThreadEntry(Synth* s);
     void ThreadLoop();
 
-    pf::audio_stream_ptr stream_;
+    platform::audio_stream_ptr stream_;
     std::vector<int16_t> pcm_;
 
     std::thread thread_;

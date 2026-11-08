@@ -1,12 +1,11 @@
 // zpilot - entry point and deterministic capture driver.
 #include "Game.h"
 
-#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string_view>
 
-#include "platform.h"
+#include <libdesktop/platform.h>
 
 using namespace zp;
 
@@ -18,8 +17,7 @@ struct Beat {
     bool down;
 };
 
-// A key edge pair: queued through libdesktop after the frame pump, then flushed
-// through the same reactor path as a real keyboard event.
+// A key edge pair is sent through the same platform callback seam as a real keyboard event.
 struct Tap {
     int frame;
     Key key;
@@ -74,68 +72,35 @@ const Shot kShots[] = {
     {1695, L"shots/15_starmap3.png", Mode::Grid, kDeepPlanet},
 };
 
-bool HasParam(const std::span<const std::string_view> params, const std::string_view value) {
-    for (const auto param : params)
-        if (pf::icmp(param, value) == 0) return true;
+bool HasParam(const std::string_view command_line, const std::string_view value) {
+    for (const auto param : core::split(command_line, true))
+        if (core::icmp(param, value) == 0) return true;
     return false;
 }
 
-class Application {
+class Application final : public platform::app {
 public:
-    bool Initialise(const pf::window_frame_ptr& frame, bool capture) {
-        capture_ = capture;
-        if (capture_) {
-            const pf::file_path shots("shots");
-            if (!pf::platform_create_directory(shots)) {
-                pf::debug_trace("zpilot: capture directory creation failed: " +
-                                pf::platform_last_error_message());
-                return false;
-            }
-            const pf::file_path runProfile = shots.combine("profile.dat");
-            const auto profileState = pf::query_file(runProfile);
-            if (profileState.status == pf::file_query_status::failed) {
-                pf::debug_trace("zpilot: capture profile query failed: " +
-                                profileState.error.message);
-                return false;
-            }
-            if (profileState.found() && pf::is_directory(runProfile)) {
-                pf::debug_trace("zpilot: capture profile path is a directory");
-                return false;
-            }
-            if (profileState.found() && !pf::platform_delete_file(runProfile)) {
-                pf::debug_trace("zpilot: capture profile cleanup failed: " +
-                                pf::platform_last_error_message());
-                return false;
-            }
-            Profile::UseFolder(shots);
-        } else {
-            Profile::UseFolder({});
-        }
-        return window_.Attach(frame);
+    bool parse_command_line(const std::string_view command_line) override {
+        capture_ = HasParam(command_line, "-capture");
+        return false;  // capture deliberately remains a visible, deterministic game run
     }
 
-    int Run() {
-        if (!renderer_.Init(window_.Frame(), window_.Width(), window_.Height())) {
-            const std::string error = renderer_.Error().empty()
-                                          ? "Direct3D 11 initialisation failed"
-                                          : renderer_.Error();
-            if (capture_)
-                pf::debug_trace("zpilot: " + error);
-            else
-                pf::platform_show_error(error, "zpilot");
-            return 1;
-        }
-        if (!synth_.Init())
-            pf::debug_trace("zpilot: audio unavailable, continuing silently");
-        if (!game_.Init(&renderer_, &synth_, &window_)) return 1;
-
-        const int result = capture_ ? RunCapture() : RunInteractive();
-        if (synth_.AudioFailed())
-            pf::debug_trace("zpilot: audio stream failed, continuing silently");
-        return result;
+    bool init(const std::string_view command_line) override {
+        capture_ = HasParam(command_line, "-capture");
+        Initialise();
+        return true;  // main_loop reports startup failures with the game's exit code
     }
 
-    void Shutdown() {
+    bool owns_loop() const override { return true; }
+
+    int main_loop() override {
+        if (!startupError_.empty()) return 1;
+        return capture_ ? RunCapture() : RunInteractive();
+    }
+
+    bool can_exit() override { return true; }
+
+    void exit() override {
         synth_.Shutdown();
         renderer_.Shutdown();
         window_.Destroy();
@@ -143,6 +108,71 @@ public:
     }
 
 private:
+    void Fail(std::string message) {
+        if (startupError_.empty()) startupError_ = std::move(message);
+        core::trace("zpilot: " + startupError_);
+    }
+
+    bool PrepareCaptureProfile() {
+        // create_folder takes a full path, so the capture's folder is named from where it runs.
+        const auto shots = platform::current_directory().combine("shots");
+        const auto created = platform::create_folder(shots);
+        if (created.failed() && !platform::is_directory(shots)) {
+            Fail("capture directory creation failed: " + created.error_message);
+            return false;
+        }
+
+        const core::file_path runProfile = shots.combine_file("profile.dat");
+        const auto profileState = platform::file_attributes(runProfile);
+        if (profileState.presence == platform::file_presence::unknown) {
+            Fail("capture profile query failed");
+            return false;
+        }
+        if (profileState.exists() && platform::is_directory(runProfile)) {
+            Fail("capture profile path is a directory");
+            return false;
+        }
+        if (profileState.exists()) {
+            const auto removed = platform::delete_file(runProfile);
+            if (removed.failed()) {
+                Fail("capture profile cleanup failed: " + removed.error_message);
+                return false;
+            }
+        }
+        Profile::UseFolder(shots);
+        return true;
+    }
+
+    void Initialise() {
+        if (capture_) {
+            if (!PrepareCaptureProfile()) return;
+        } else {
+            Profile::UseFolder({});
+        }
+
+        if (!window_.Create()) {
+            Fail("platform window creation failed");
+            return;
+        }
+        if (!renderer_.Init(window_.NativeWindow(), window_.Width(), window_.Height())) {
+            const std::string error = renderer_.Error().empty()
+                                          ? "Direct3D 11 initialisation failed"
+                                          : renderer_.Error();
+            if (capture_)
+                core::trace("zpilot: " + error);
+            else
+                platform::show_error(error);
+            Fail(error);
+            return;
+        }
+        if (!synth_.Init())
+            core::trace("zpilot: audio unavailable, continuing silently");
+        if (!game_.Init(&renderer_, &synth_, &window_)) {
+            Fail("game initialisation failed");
+            return;
+        }
+    }
+
     int RunCapture() {
         synth_.SetMuted(true);
         int wrongShot = -1;
@@ -195,23 +225,27 @@ private:
             }
             renderer_.Present(false);
         }
+        if (synth_.AudioFailed())
+            core::trace("zpilot: audio stream failed, continuing silently");
         return wrongShot < 0 ? 0 : kWrongShotExit + wrongShot;
     }
 
     int RunInteractive() {
-        double previous = pf::platform_get_time();
+        double previous = platform::monotonic_seconds();
         while (true) {
             window_.NewFrame();
             if (!window_.PumpMessages()) break;
             if (window_.SizeChanged()) renderer_.Resize(window_.Width(), window_.Height());
 
-            const double now = pf::platform_get_time();
+            const double now = platform::monotonic_seconds();
             const float dt = static_cast<float>(now - previous);
             previous = now;
             game_.Frame(dt);
             renderer_.Present(true);
             if (game_.WantsQuit()) break;
         }
+        if (synth_.AudioFailed())
+            core::trace("zpilot: audio stream failed, continuing silently");
         return 0;
     }
 
@@ -220,35 +254,13 @@ private:
     Synth synth_;
     Game game_;
     bool capture_ = false;
+    std::string startupError_;
 };
-
-std::unique_ptr<Application> g_application;
 
 }  // namespace
 
-app_init_result app_init(const pf::window_frame_ptr& main_frame,
-                         const std::span<const std::string_view> params) {
-    g_application = std::make_unique<Application>();
-    const bool capture = HasParam(params, "-capture");
-    if (!g_application->Initialise(main_frame, capture))
-        return {false, 1};
-
-    app_init_result result;
-    result.window.initial_client_size = {1600, 900};
-    result.window.minimum_client_size = {320, 240};
-    result.window.fullscreen = false;
-    result.window.resizable = true;
-    result.main_loop = [] {
-        return g_application ? g_application->Run() : 1;
-    };
-    return result;
-}
-
-void app_idle() {}
-
-void app_destroy() {
-    if (g_application) {
-        g_application->Shutdown();
-        g_application.reset();
-    }
+int main(int argc, char** argv) {
+    core::set_app_name("zpilot");
+    auto app = std::make_shared<Application>();
+    return platform::run(app, argc, argv);
 }

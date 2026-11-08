@@ -22,7 +22,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libdesktop
     GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
-    GIT_TAG        31aae322af6e0696a9597726705b1121bd31580b
+    GIT_TAG        04109ee82a500db38d439fa281bbc3f43124adfe
 )
 FetchContent_MakeAvailable(libdesktop)
 
@@ -49,7 +49,7 @@ FetchContent_Declare(libfiles
 )
 FetchContent_MakeAvailable(libfiles)
 
-platform_add_app(zpilot
+libdesktop_add_app(zpilot
     SOURCES
         src/Main.cpp
         src/Window.cpp
@@ -91,7 +91,7 @@ if(BUILD_TESTING)
     add_executable(zpilot_tests tests/smoke.cpp tests/window.cpp src/Profile.cpp src/Window.cpp
         src/Synth.cpp)
     target_include_directories(zpilot_tests PRIVATE src)
-    target_link_libraries(zpilot_tests PRIVATE libdesktop::core)
+    target_link_libraries(zpilot_tests PRIVATE libdesktop::platform)
     if(MSVC)
         target_compile_options(zpilot_tests PRIVATE /W3 /EHsc)
         target_compile_definitions(zpilot_tests PRIVATE _CRT_SECURE_NO_WARNINGS)

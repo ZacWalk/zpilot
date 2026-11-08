@@ -9,7 +9,7 @@ Renderer::~Renderer() = default;
 Renderer::Renderer(Renderer&&) noexcept = default;
 Renderer& Renderer::operator=(Renderer&&) noexcept = default;
 
-bool Renderer::Init(const pf::window_frame_ptr& frame, int w, int h) {
+bool Renderer::Init(const platform::window_ptr& frame, int w, int h) {
     backend_ = std::make_unique<RendererD3D>();
     if (!backend_->Init(frame, w, h)) {
         error_ = backend_->Error();

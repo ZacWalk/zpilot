@@ -56,8 +56,8 @@ Three traps:
   on the wrong screen with every frame still lit. That is what the `Mode` (and,
   after the second act's taps, the planet) on each shot catches: the capture
   exits with 100 plus the shot's index. The second act's star-map moves are
-  `kTaps`, queued input edges that go down and up inside one frame, so they also
-  cover `Window`'s latch for taps shorter than a frame; the fake reactor test
+  `kTaps`, queued key messages that go down and up inside one frame, so they also
+  cover `Window`'s latch for taps shorter than a frame; the fake window-event test
   covers the same path from platform keyboard callbacks.
 - The capture is the gameplay coverage. A frame going blank, a
   shot on the wrong screen or the run hanging is a real regression, not a flaky
@@ -70,8 +70,10 @@ Build output lands in `build/release` and `build/debug`, screenshots in the
 
 ## What this project is
 
-A Windows / Direct3D 11 / C++20 game with libdesktop's shared window, input,
-frame-loop and audio infrastructure, and **no assets of any kind**. Rock, ships,
+A Windows / Direct3D 11 / C++20 game with **no assets of any kind**. Its
+`Application::main_loop` owns the game frame loop (`owns_loop()` is true), while
+libdesktop supplies platform lifecycle, `pump_events`, native window/input
+events, fullscreen/DPI and audio. Rock, ships,
 props, glyphs, music and sound effects are all generated in code from a seed.
 That is a hard constraint and the point of the exercise: when something looks
 flat or repetitive, write a better algorithm, do not add a file.
@@ -88,7 +90,7 @@ flat or repetitive, write a better algorithm, do not add a file.
 | `Geometry.*` | Every mesh in the game, built from the primitives at the top of the file. |
 | `Renderer.*` / `Shaders.h` | HDR scene, additive effects, bloom, CRT composite. |
 | `Font.*` | Stroke font, screen space and world space. |
-| `Window.*` | libdesktop frame/reactor and game input state. |
+| `Window.*` | libdesktop platform window events and game input state. |
 | `Synth.*` | Procedural audio rendered into libdesktop's audio stream. |
 | `Profile.*` | Save file in `%APPDATA%\zpilot\profile.dat` (the capture keeps its own in `shots/`). |
 | `Game.*` | Everything else: modes, flight, props, HUD, star map. |
