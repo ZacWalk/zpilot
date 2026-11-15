@@ -1,10 +1,10 @@
 # Runs zpilot's scripted capture and checks every reference frame it writes.
-# The capture exits cleanly even when nothing was drawn, so a missing or black
-# frame is the evidence that the renderer broke; a frame caught on a different
+# A missing or black frame is evidence that the renderer broke; a frame on a different
 # screen than its name says comes back as the exit code, and means the script did.
 param(
     [Parameter(Mandatory)] [string] $Exe,
-    [Parameter(Mandatory)] [string] $WorkDir
+    [Parameter(Mandatory)] [string] $WorkDir,
+    [switch] $Headless
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,7 +32,7 @@ function Measure-Frame([string] $path) {
 }
 
 # kShots in src/Main.cpp is the list of frames; read it rather than repeat it.
-$main = Join-Path $PSScriptRoot '../src/Main.cpp'
+$main = Join-Path $PSScriptRoot '..\src\Main.cpp'
 $expected = @(Select-String -Path $main -Pattern 'L"shots/([^"]+)\.png"' -AllMatches |
     ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value })
 if ($expected.Count -eq 0) {
@@ -40,31 +40,13 @@ if ($expected.Count -eq 0) {
     exit 1
 }
 
-$shots = Join-Path $WorkDir 'shots'
-if (Test-Path -LiteralPath $shots -PathType Leaf) {
-    Write-Host "FAIL  capture path is a file, not a directory: $shots"
-    exit 1
-}
-if (Test-Path -LiteralPath $shots -PathType Container) {
-    foreach ($oldShot in @(Get-ChildItem -LiteralPath $shots -Filter '*.png' -File -ErrorAction Stop)) {
-        Remove-Item -LiteralPath $oldShot.FullName -Force -ErrorAction Stop
-        if (Test-Path -LiteralPath $oldShot.FullName) {
-            Write-Host "FAIL  could not remove old screenshot $($oldShot.FullName)"
-            exit 1
-        }
-    }
-}
+$run = Join-Path $WorkDir ('captures\run-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $run -ErrorAction Stop
+$shots = Join-Path $run 'shots'
 
 # The third act ends a run, so the capture writes a save file: its own, beside
 # the shots. The player's log in %APPDATA% must come through untouched.
 $runProfile = Join-Path $shots 'profile.dat'
-if (Test-Path -LiteralPath $runProfile) {
-    Remove-Item -LiteralPath $runProfile -Force -ErrorAction Stop
-    if (Test-Path -LiteralPath $runProfile) {
-        Write-Host "FAIL  could not remove old capture profile $runProfile"
-        exit 1
-    }
-}
 $playerProfiles = @(
     (Join-Path $env:APPDATA 'zpilot\profile.dat'),
     (Join-Path $env:APPDATA 'z-pilot\profile.dat')
@@ -77,39 +59,68 @@ function Get-Stamp([string] $path) {
 $playerBefore = @{}
 foreach ($profile in $playerProfiles) { $playerBefore[$profile] = Get-Stamp $profile }
 
-$p = Start-Process -FilePath $Exe -ArgumentList '-capture' -WorkingDirectory $WorkDir -PassThru
-$null = $p.Handle   # without a cached handle, ExitCode is unreadable after a non-waiting start
-# A GPU renders the 1700 frames in about half a minute. A CI runner has none, so
-# Direct3D renders them in software, which has taken from two to four minutes.
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = (Resolve-Path -LiteralPath $Exe).Path
+$start.ArgumentList.Add($(if ($Headless) { '--capture-headless' } else { '-capture' }))
+$start.WorkingDirectory = $run
+$start.UseShellExecute = $false
+$start.CreateNoWindow = $true
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+$p = [Diagnostics.Process]::new()
+$p.StartInfo = $start
+$null = $p.Start()
+$stdout = $p.StandardOutput.ReadToEndAsync()
+$stderr = $p.StandardError.ReadToEndAsync()
+# A desktop draws the 1700 frames in 10-20 seconds. A runner without a GPU draws
+# the window on a software adapter instead, which is slower.
 if (-not $p.WaitForExit(600000)) {
-    $p.Kill()
+    $p.Kill($true)
+    $p.WaitForExit()
     Write-Host 'FAIL  capture run hung (more than 600 s)'
     exit 1
 }
+$output = $stdout.GetAwaiter().GetResult()
+$errors = $stderr.GetAwaiter().GetResult()
+Write-Host $output
+if ($errors) { [Console]::Error.WriteLine($errors) }
+$exitCode = $p.ExitCode
+$p.Dispose()
 # From 100 up, the exit code names the first shot that caught the wrong screen
 # or planet (kWrongShotExit in src/Main.cpp) - a key the script pressed did not land.
-$wrong = $p.ExitCode - 100
+$wrong = $exitCode - 100
 if ($wrong -ge 0 -and $wrong -lt $expected.Count) {
     Write-Host "FAIL  $($expected[$wrong]) is not on the screen or planet kShots names for it ($shots)"
     exit 1
 }
-if ($p.ExitCode -ne 0) {
-    Write-Host "FAIL  capture run exited with code $($p.ExitCode)"
+if ($exitCode -ne 0) {
+    Write-Host "FAIL  capture run exited with code $exitCode"
     exit 1
 }
 
 $failures = 0
+$checks = 0
+if ($Headless) {
+    $checks++
+    if (-not $output.Contains('capture: hidden window verified')) {
+        Write-Host 'FAIL  capture did not verify its hidden native window'
+        $failures++
+    }
+}
+$checks++
 if (-not (Test-Path $runProfile) -or (Get-Item $runProfile).Length -le 16) {
     Write-Host "  profile.dat    MISSING - the third act wrote no save file to $shots"
     $failures++
 }
 foreach ($profile in $playerProfiles) {
+    $checks++
     if ((Get-Stamp $profile) -ne $playerBefore[$profile]) {
         Write-Host "  profile.dat    the capture wrote the player's save file, $profile"
         $failures++
     }
 }
 foreach ($name in $expected) {
+    $checks++
     $file = Join-Path $shots "$name.png"
     if (-not (Test-Path $file)) {
         Write-Host ('  {0,-14} MISSING' -f $name)
@@ -125,7 +136,7 @@ foreach ($name in $expected) {
 }
 
 if ($failures -gt 0) {
-    Write-Host "FAIL  $failures checks failed ($shots)"
+    Write-Host "FAIL  $checks checks, $failures failed ($shots)"
     exit 1
 }
-Write-Host "PASS  $($expected.Count) frames rendered, save file kept in $shots"
+Write-Host "PASS  $checks checks, 0 failed; $($expected.Count) frames checked, save file kept in $shots"

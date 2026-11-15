@@ -23,31 +23,39 @@ get wider.
 
 ## 2. The camera contract
 
-The camera looks **straight down the Z axis** at a slice through the planet. It
-never rotates. It only pans and dollies.
+The camera looks **straight at the cut face**. It never rotates. It only pans,
+and zooms by moving nearer or further away. The screen *is* the play plane:
+one world unit is the same number of pixels everywhere on it.
 
-| Depth | What lives there |
+The picture is drawn flat, back to front, and depth is something it *says*
+rather than something a renderer computes:
+
+| Layer | What it says |
 |---|---|
-| `z ≈ 0` | The play plane. Ship, orb, rope, bullets, particles, every prop. |
-| `z ≈ 0…3` | The cut face of the rock — deliberately shallow. |
-| `z ≈ 3…55` | The bore: the inside of the tunnel, curving away behind the play plane. |
-| `z ≈ 55+` | Nothing. Stars and nebulae live far behind, for parallax only. |
+| Space | Stars and nebulae far behind, sliding by slower the further back they are. |
+| The atmosphere | The planet's own sky, in bands of height. It moves with the slice, not the stars. |
+| The skirt | The planet's top, seen in perspective behind its front edge. |
+| The cut face | Rock, dead flat. |
+| The bore | The inside of the tunnel, stepping down in bands of colour as it gets deeper. |
+| The boundary | The collision line, over both. |
+| The play plane | Ship, orb, rope, bullets, particles, every prop. |
+| The HUD | Over everything, in screen space. |
 
-**Every unit of relief in front of the play plane is a bug.** If the cut face
-stands proud of the props, the props read as floating in mid-air rather than
-bolted to the rock, and the parallax you see as the camera moves is between the
-props and the wall instead of between the front of the terrain and the back of
-it. The cut face is therefore kept almost flat and all the depth is spent on the
-bore behind.
+**Nothing on the play plane slides against the rock.** Props, the ship and the
+cut face move together exactly, because they are one plane; the only parallax
+in the frame is between the slice and what lies behind it. A prop given parallax
+of its own reads as floating in front of the rock rather than bolted to it.
+Particles alone drift a little either side of the plane, so a cloud of them has
+some body; they are effects, not things the player has to hit or miss.
 
 **The rule that matters:** *gameplay is 2D and lives on one plane; depth is
-scenery.* The player must never have to judge a Z position to play. Two
-consequences that are easy to get wrong:
+scenery.* The player must never have to judge depth to play. Two consequences
+that are easy to get wrong:
 
-- **Nothing gameplay-relevant is pushed backwards in Z.** A fuel tank shoved
-  10 units behind the play plane reads as "sitting on the back wall", which
-  breaks the cross-section: in a cut-away, objects are *in* the passage, not
-  pasted onto the surface behind it. They stay at `z ≈ 0`.
+- **Nothing gameplay-relevant is drawn as if it were behind the plane.** A fuel
+  tank drawn small, dimmed into the bore's colour or sliding with the stars
+  reads as "sitting on the back wall", which breaks the cross-section: in a
+  cut-away, objects are *in* the passage, not pasted onto the surface behind it.
 - **Bullets and props must visually agree.** Both are on the play plane, so a
   shot that looks like it hits is a shot that hits.
 
@@ -58,58 +66,75 @@ consequences that are easy to get wrong:
 The cavern's back surface is the inside of a **deformed half pipe**.
 
 Take the tunnel to be a cylinder of radius `R` whose axis lies in the cut plane.
-Slice it lengthwise and you see the inside of a half-cylinder: at the wall the
-surface is vertical, and at the centre line it is flat and at its deepest. In
-code that is exactly
+Slice it lengthwise and you look into a trough: steep at the wall, flat along the
+centre line and deepest there. In code that is
 
 ```
-depth(d) = sqrt( d · (2R − d) )
+depth(d) = d · (2R − d) / R
 ```
 
 where `d` is the distance to the nearest wall and `R` is the radius of the
-passage the point is standing in.
+passage the point is standing in. It is a parabola rather than the true half
+circle, `sqrt(d · (2R − d))`: the circle leaves the wall vertically, which would
+crowd every band of depth into the wall line, and the parabola leaves it steeply
+but at a slope, so the first bands have room to be seen. Both are `R` deep at
+the centre line.
 
-This is why the shape had to become sophisticated rather than just noisy:
+This is why the shape is sophisticated rather than just noisy:
 
 - `d` is the signed field, which the game already has.
 - `R` is **not** the same thing. It is the radius of the largest inscribed
   circle that still contains the point — a tight neck has a small `R` even at
   its centre, a big chamber has a large `R` right up to its walls. It is
   computed once per planet by propagating `(radius, remaining reach)` outward
-  from every cell, which costs three sweeps of the grid.
+  from every cell, which costs three forward-and-back passes over the grid.
 
 The result the player should read:
 
-- **Sides delineated.** The surface leaves the cut edge near-vertically, so the
-  wall is a wall.
-- **Curving out at the bottom.** It flattens along the centre line, so the
+- **Sides delineated.** The bands crowd together at the wall, so the wall is a
+  wall.
+- **Curving out at the bottom.** They spread along the centre line, so the
   passage has a floor and not a crease.
 - **Narrow tunnels are shallow, big chambers are deep.** Depth tracks width, the
-  way a real bore does. This is the whole source of the parallax.
+  way a real bore does: a neck reaches two or three bands, a big chamber all
+  seven.
 
 Both the bore radius and the wall distance are pushed around by noise, so no two
 stretches of tunnel have the same section.
 
-### Two sheets, two materials
+### Stepped, not shaded
 
-The slice is built as **two meshes over the same grid**, sharing the cavern
-isoline exactly so they meet without a seam:
+The bore is drawn as **seven nested bands**, each the part of the cave deeper
+than one step (`kBoreLevel`), each a flat colour: a copper list run down the
+inside of the tunnel. Deeper bands are darker and a little more saturated, and
+lower in the planet the whole bore drifts toward violet, so every height has its
+own palette line. A band is the region where `min(depth − step, open)` is
+positive, so each one is cut from inside the last, cell by cell, and they nest
+without a gap however the noise falls.
+
+### One grid, two materials
+
+The rock and every band of the bore are cut from **the same grid by the same
+marching squares**, and every point where the field crosses a cell edge has one
+name and one position whichever piece asks for it. So the rock, the bands and
+the boundary meet exactly — no seam, no overlap, no sliver of background.
 
 | | The cut face | The bore |
 |---|---|---|
 | What it is | Solid rock you are looking at end-on | The inside of the tunnel |
-| Material | Dull, desaturated, matte | Lit, veined, plasma-washed |
-| Emissive | **None** | Full |
+| Drawn as | Strata in four stones, broken into flat facets | Nested bands, one flat colour per step of depth |
+| Colour | Dull earth tones, darker toward the core | The star system's own hue |
+| Light | None until a lamp reaches it | Lamps pool across it |
 | Reads as | Dead stone | Somewhere you can fly |
 
 The cut face is deliberately inert. It is the thing the caverns have to stand
-out *from* — if the rock glows too, the player has nothing to read. Because it
-has no emissive at all it carries a higher base value than the bore, so it still
-looks like stone rather than a hole.
+out *from* — if the rock is bright too, the player has nothing to read. A darker
+lip runs along every cut, where the facets stop short of the edge, like the
+sawn face of a block.
 
 Islands and pillars are simply places where the field never went negative, so
-the surface never sank. They connect to the surrounding rock because they were
-never separate from it.
+the bore never reached them. They connect to the surrounding rock because they
+were never separate from it.
 
 The only hard silhouette in the whole scene is the **planet against the sky**,
 which is why that one edge still gets a skirt — a slice of a planet should not
@@ -122,11 +147,16 @@ look like paper. Cavern edges never get one.
 The player flies against a **2D isoline**. That line is the entire collision
 model. Every crash, every near miss, every threaded gap is judged against it.
 
-So the line is **drawn explicitly**, as a ribbon of constant world width baked
-along the isoline. It is not a shading gradient, not a fresnel edge, not a
-by-product of the tessellation — because all of those thin out or thicken
-depending on viewing angle and mesh density, and the player would be judging
-their collisions against something that lies to them.
+So the line is **drawn explicitly**, as an outline of constant width centred on
+the isoline — `kEdgeWidth` world units, zooming with the plane like everything
+on it. It is not the edge of a fill, not a gradient, not a by-product of how the
+rock happens to be cut — because all of those thin out or thicken with the zoom
+and the pieces around them, and the player would be judging their collisions
+against something that lies to them.
+
+It is drawn after the rock, the bore and the lamps, so no light ever tints or
+dims it. Only a dark planet's torch hides it, along with everything else beyond
+its reach.
 
 > **If you can see the bright line, you know exactly where you will crash.**
 
@@ -183,7 +213,7 @@ same way real equipment in a mine is bolted to the rock beside you.
 Two things this rules out:
 
 - **No artificial flat pads.** Cutting a level ledge into the rock so a box has
-  somewhere to stand is the old, flat way of thinking. The box goes on the wall
+  somewhere to stand is the flat way of thinking. The box goes on the wall
   as it is.
 - **No depth struts.** A strut running back from a prop to the wall behind
   implies the prop is in front of a surface rather than inside a passage. It
@@ -242,7 +272,7 @@ a planet you are already flying again.
 
 35 planets in a 7×5 grid, each one a fixed seed. A planet index maps to exactly
 one cavern, forever — which is why the card on the star map can show the real
-thing, generated from the same seed at a quarter resolution.
+thing, generated from the same seed in a coarser pass.
 
 - Planets have **names**, not numbers. Named places get remembered.
 - Each **row is a star system**. Difficulty climbs across a row, the seventh
@@ -297,52 +327,77 @@ always has a target. That is the whole loop.
 
 ## 10. Everything is generated
 
-No textures, no models, no sound files, no fonts. Rock, ships, props, glyphs,
-music and effects are all produced in code from a seed.
+No textures, no models, no sprites, no sound files, no fonts. Rock, ships,
+props, glyphs, music and effects are all produced in code from a seed.
+
+The desktop icon follows the same rule: Python vector instructions are rasterised
+into a build-generated Windows resource, never an imported or runtime-loaded asset.
 
 This is a constraint, and the point of the project. When something looks flat or
 repetitive, the answer is a **better algorithm**, not an asset.
 
 Two vocabularies, and they must not blur:
 
-- **Natural** things — the cave walls, boulders, rubble — get complex, irregular,
-  faceted geometry in the rock palette. A falling rock is built the way the cave
+- **Natural** things — the cave walls, boulders, rubble — get irregular,
+  faceted outlines in the rock palette. A falling rock is built the way the cave
   is built.
 - **Made** things — the ship, drums, crates, turrets, the factory — are allowed
   to be smooth, symmetrical and geometric. That contrast is what tells the player
   at a glance which is which.
 
-The ship is a single lathed hull with its fins grown out of the same surface by
-modulating the radius, and it rolls slowly about its long axis. It has no
-cockpit and no bolted-on parts: one continuous body that reads from every angle.
-
-### Nothing in the cavern is lit by a fixture
-
-There are no lamps in the rock. Beyond a fixed key and fill, **every light in
-the frame belongs to something in the fiction** — the engine, the orb, the
-factory, a fuel cell, a lit fuse, a blast. So the cavern is dark until the
-player does something to it, and an explosion genuinely throws the walls into
-relief instead of being a sprite pasted over them. A planet where nothing is
-happening is a planet that looks like nothing is happening, and that is the
-point.
-
-The budget is small on purpose — the eight strongest lamps win — because a
-scene lit by everything at once is lit by nothing.
+The ship is a lathe drawn side on: one hull outline turned from a radius
+profile, with three fins grown out of it that swing round and narrow as it rolls
+slowly about its long axis. It has no cockpit and no bolted-on parts: one
+continuous body that reads as solid rather than as a card.
 
 ### The two vocabularies are a material, not just a shape
 
-Made things take a **specular highlight**. Natural things never do; they get
-procedural **grain** instead, evaluated in world space, which tilts the normal
-and mottles the albedo so the enormous low-resolution rock sheet reads as stone
-rather than as facets. No mesh gets both. That single split is what tells the
-player at a glance which things are equipment and which are the planet.
+Made things are **metal**: graded across the part along the key light, with one
+bright glint on the edge that faces it and a dark pixel outline, so a prop reads
+as one crisp sprite at every zoom. The light stays put as the part turns, which
+is what makes it read as lit rather than painted. Natural things never get a
+gradient or a glint: they are fans of **flat facets**, each stepped to one of
+four tones by which way it faces. No figure gets both. That single split is
+what tells the player at a glance which things are equipment and which are the
+planet.
 
-Natural things are also drawn the way a software renderer of the era drew rock:
-the grain and the light are read once per world-space **texel**, on whichever
-axis plane faces the surface, and the stone's brightness is stepped into bands
-joined by an ordered dither. Crisp and point-sampled, never smeared. The boundary
-contour is kept out of that ramp — it is the collision line, so it is never
-banded or dithered.
+### The palette is the era
+
+The look is a 16-bit home computer's, drawn at the screen's own resolution:
+
+- **Twelve-bit colour.** Every solid colour is snapped to four bits a channel,
+  the palette registers of the machine the look comes from. Limited steps are
+  most of what gives the screen its era.
+- **Copper bands.** The sky and the bore change colour in horizontal bands,
+  stepping rather than blending, with the next colour dithered in over the last
+  lines of each band like a raster split. Where the air thins out it is drawn
+  on every second line, then every third and fourth — a screen door — so the
+  stars come through it. The title screen's bars are the same trick, moving.
+- **Flat clouds.** Nebulae are a few nested bands of palette colour each,
+  opaque and never blended, merging where they overlap.
+- **Hard edges.** Rock, bands and props are drawn crisp, without anti-aliasing,
+  and neighbouring pieces meet with neither gap nor overlap.
+- **Glows are for things that emit.** Radial gradients belong to the engine, the
+  orb, relics, blasts and lamps — never to stone.
+
+Banding is a choice, and one thing is kept out of it: the boundary contour is
+the collision line, so it is never banded, stepped or dithered.
+
+### Nothing in the cavern is lit by a fixture
+
+There are no lamps in the rock. Beyond the fixed key light that shapes made
+things, **every light in the frame belongs to something in the fiction** — the
+engine, the orb, the factory, a fuel cell, a lit fuse, a blast. So the cavern is
+dark until the player does something to it, and an explosion genuinely throws
+the walls into relief instead of being a sprite pasted over them: each facet of
+the cut face it reaches steps brighter on its own, in hard steps out from the
+lamp, and its light pools across the bore. A planet where nothing is
+happening is a planet that looks like nothing is happening, and that is the
+point.
+
+The budget is small on purpose — the eight strongest lamps light the rock, and
+only the four strongest pool across the bore — because a scene lit by
+everything at once is lit by nothing.
 
 ---
 
@@ -352,14 +407,17 @@ A change that breaks any of these is wrong regardless of how it looks:
 
 1. The camera never rotates; gameplay never requires judging depth.
 2. The collision boundary is always drawn as an explicit, constant-width line
-   that lies *on* the surface, not in front of it.
-3. Gameplay objects stay on the play plane, and nothing stands proud of it.
+   exactly on the isoline, over the rock and the bore and untouched by light.
+3. Gameplay objects stay on the play plane and move exactly with the rock; only
+   what lies behind the slice has parallax.
 4. Placed objects attach to the 2D cave boundary and face out of it.
-5. Rock, bore and island are one continuous surface; only the caves glow.
+5. Rock, bore and island are one continuous slice cut from one grid, meeting
+   without a seam; the rock is dead stone and only the caves have colour.
 6. Nothing in the game counts down, and nothing measures elapsed time.
 7. One ship per planet; retry costs one keypress.
 8. A planet index always produces the same cavern for a given `kGenVersion`.
-9. No external assets, and natural geometry never looks made.
+9. No external assets, and natural geometry never looks made: facets in the
+   rock palette, never a gradient or a highlight.
 10. Every light in the world belongs to an object in the fiction; rock takes a
     highlight from nothing.
 
@@ -367,23 +425,34 @@ A change that breaks any of these is wrong regardless of how it looks:
 
 ## 12. Platform and renderer boundary
 
-`platform::app`/`platform::run` provide lifecycle; `platform::pump_events` and
-`platform::window` provide event pumping, window/input, DPI and fullscreen, while
-media services provide audio. `Application::main_loop` owns the game frame loop,
-and `Window` translates callbacks into the game's key states and latches one-frame
-taps; focus loss clears held input before the next simulation frame. The scripted
-capture uses the same input seam, including its short taps, so the three capture
-acts remain coverage rather than a second game loop.
+zpilot is a libdesktop `ui::shell` application: one window, no menu bar, and a
+`ui::canvas_element` as its content. The shell steps the game at a fixed sixty
+steps a second — `Game::Step` is the whole simulation frame — and the canvas's
+draw callback is `Game::Draw`, which reads the state the last step left and
+changes nothing a step depends on. Keys come from the shell's `key_input`: held,
+pressed and released since the last step, so a tap shorter than a step still
+lands, and focus loss clears what is held. `Input` maps key codes to the game's
+actions; the mouse buttons are two more codes.
 
-The scene renderer is deliberately **not** libdesktop-render. zpilot's HDR scene
-buffer, additive batches, three-level bloom chain, shockwave and CRT composite
-are the game's visual language and remain an explicit Direct3D 11 backend.
-Only the Direct3D backend calls `platform::window::native_handle()` to obtain
-the HWND for its swap chain. No public game or portable header exposes a
-Windows handle, and no shared desktop renderer replaces the procedural meshes,
-shaders, post effects or deterministic capture output.
+Everything visible goes through libdesktop's 2D API. `Renderer` wraps a
+`render::draw_context` with the world-to-screen camera, and the whole frame is
+crisp polygons, rectangles, lines and gradient fills drawn through it —
+Direct3D 11 in the window, the software renderer in a screenshot. zpilot has no
+shaders, no meshes and no Direct3D code of its own.
 
-Screenshot readback still belongs to this backend: the mapped BGRA8 staging rows
-go to libfiles' PNG encoder and the completed bytes are published through the
-shared atomic file service. Encoding and publication happen before
-`Present`, so a failed capture cannot report a stale or partially written frame.
+A screenshot, from F12 or the capture, draws the canvas again with
+`ui::render_to_surface` at the shot's size. The pixels go to libfiles' PNG
+encoder and the finished bytes are published through the shared atomic file
+service, so a failed shot never leaves a stale or half written file behind.
+
+`--capture-headless` runs the same application with the shell's offscreen
+window: shown, so that it paints, but cloaked from the desktop, never focused
+and never brought to the front, which the capture checks before and during the
+run. The capture replaces the shell's wall-clock loop with its own — one step
+per frame, the script's keys pressed through `key_input`, its taps posted to the
+window as real key messages that go down and up inside one frame, then a
+present — so the script lands on the same frames however long a frame takes to
+draw. The test runner keeps every capture in a fresh directory and verifies the
+results act's isolated save file as well as both untouched player profiles.
+`-capture` is the visible variant. Only `Main.cpp` calls Windows directly: for
+that offscreen check and for the posted taps.

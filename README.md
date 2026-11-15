@@ -2,16 +2,11 @@
 
 [![Build](https://github.com/ZacWalk/zpilot/actions/workflows/build.yml/badge.svg)](https://github.com/ZacWalk/zpilot/actions/workflows/build.yml)
 
-A gravity-and-thrust cave flyer for Windows. You fly a rocket through tunnels
-bored into a planet that has been cut in half, hauling an orb on a chain that
-drapes, swings and whips.
+A gravity-and-thrust cave flyer for Windows, in the spirit of Thrust and XPilot.
+You fly a rocket through tunnels bored into a planet that has been cut in half,
+hauling an orb on a chain that drapes, swings and whips.
 
-Starting around 1995 I wanted to make a game inspired by the classic games Thrust
-and also XPilot. Originally I actually wrote it for DOS using Turbo C++, but it
-slowly evolved into what you see here. I pulled this code from a backup CD from
-around 2001 and modernised it to build.
-
-![zpilot gameplay showing the ship, cavern, orb and flight HUD](docs/screenshot.png)
+![zpilot gameplay: the ship over a cavern cut into the planet, with the flight HUD](docs/screenshot.png)
 
 *A frame from the deterministic gameplay capture.*
 
@@ -27,13 +22,14 @@ for the engines that move you and the shield that pays for your mistakes.
   next unlocks once you clear four of seven.
 - **Everything is a rigid body** — ship, orb, chain, drums, crates, boulders and
   propped shelves — so every hazard is also a tool.
+- **No assets.** There are no textures, models, sprites, sound files or fonts:
+  the rock, ships, props, glyphs, music and effects are all generated in code
+  from a seed.
+- **A 16-bit look at full resolution.** Everything is drawn in 2D in a
+  twelve-bit palette: copper-banded skies and caverns, faceted rock, chrome
+  lettering and crisp edges.
 
-## No assets
-
-There are no textures, models, sound files or fonts. The rock, ships, props,
-glyphs, music and effects are all generated in code from a seed. That is the
-point of the exercise: when something looks flat, the answer is a better
-algorithm, not another file.
+[docs/design.md](docs/design.md) explains why each of these holds.
 
 ## Controls
 
@@ -49,36 +45,62 @@ back towards the star map, <kbd>F1</kbd> shows the manual, <kbd>F3</kbd> mutes,
 
 ## Building
 
-Windows, Direct3D 11, C++20. Requires Visual Studio with the Desktop C++
+Windows, C++20, Python 3.9+. Requires Visual Studio with the Desktop C++
 workload; the vendored [dd](https://github.com/ZacWalk/dd) runtime locates it and
 uses the CMake and Ninja that ship with it.
 
-zpilot uses libdesktop's platform application lifecycle, event pump and
-window-input services, fullscreen handling and audio; the application owns its
-game frame loop, Direct3D 11 renderer and generated assets.
-
 ```powershell
-.\dd.ps1 build        # both configurations
-.\dd.ps1 test         # build and run the suite
-.\dd.ps1 launch       # build Release, then start the game
+.\dd.ps1 build                # both configurations
+.\dd.ps1 test --label zpilot  # unit checks and the scripted capture, in both configurations
+.\dd.ps1 test --label headless # the same gate, with genuinely hidden gameplay capture
+.\dd.ps1 launch               # build Release, then start the game
 ```
 
-The executable is `zpilot.exe`. Progress is saved in
-`%APPDATA%\zpilot\profile.dat`. If that file is absent, the game reads the old
-`%APPDATA%\z-pilot\profile.dat`; the next save uses the new folder and leaves
-the old file untouched. An existing new profile always takes precedence,
-even if it cannot be read. Scripted captures keep their own profile beside
-their screenshots and never import or update either player profile.
+The executable is `zpilot.exe`, in `build\release` or `build\debug`.
 
-`.\dd.ps1 test --label zpilot` checks profile migration and the scripted
-capture in both configurations.
+Both labels run the full three-act script through the game's real window and
+renderer: 1,701 steps and frames, all 15 reference screenshots, mode/planet
+checks and save-profile isolation. The explicit `--capture-headless` mode draws
+into an offscreen native window that is never shown on a monitor or activated,
+and prints its results to the console. `-capture` remains an interactive,
+visible capture mode.
+Each checked capture gets a fresh `build\<config>\captures\run-*\shots`
+directory; previous captures are retained.
+
+Test presets show passing output and the actual check/frame counts. After
+building the updated executable, rerun with
+`ctest --preset debug -L headless -V --no-tests=error` (or `release`).
+The capture script redirects and drains both streams and awaits the GUI
+executable; direct invocations must likewise be piped or explicitly awaited.
+
+Progress is saved in `%APPDATA%\zpilot\profile.dat`. When that file does not
+exist, the game reads `%APPDATA%\z-pilot\profile.dat` instead and leaves it
+untouched; the next save goes to the `zpilot` folder. A `zpilot` profile always
+takes precedence, even one that cannot be read. The scripted capture keeps its
+own profile beside its screenshots and never reads or writes the player's.
+
+### Procedural desktop icon
+
+The build rasterises `tools\generate_icon.py` into its own generated ICO resource:
+a continuous rocket hull, engine flame and chained orb. No artwork is checked in
+or loaded beside the game. It uses Python's standard library and the vendored
+`tools\iconlib.py`, with no font, graphics package or sibling import.
+For a standalone export, run
+`python tools\generate_icon.py --output tmp\zpilot.ico`; append `--check` to verify
+it, or use `--output tmp\icon-128.png --size 128` for another size.
 
 ## Documentation
 
 - [docs/design.md](docs/design.md) — what the player is meant to believe is
   happening, and the invariants the code must not break
-- [AGENTS.md](AGENTS.md) — conventions for contributors and coding agents
+- [AGENTS.md](AGENTS.md) — the gate, the traps and the conventions, for
+  contributors and coding agents
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The executable includes
+[libdesktop](https://github.com/ZacWalk/libdesktop) and
+[libfiles](https://github.com/ZacWalk/libfiles), which are licensed under the
+Mozilla Public License 2.0: anyone distributing the executable must tell its
+recipients where to get their source code, including any changes made to it.
+`tools/iconlib.py` is vendored from libdesktop under the same licence.

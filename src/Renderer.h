@@ -1,113 +1,131 @@
-// zpilot - portable scene-renderer contract.
-//
-// The implementation is an explicit Direct3D 11 backend. Keeping this
-// contract free of the backend's headers lets gameplay, geometry and font code
-// remain platform-neutral without weakening the game's renderer.
+// zpilot - the 2D renderer. A camera that pans and zooms over the play plane
+// but never rotates, and the few primitives the game draws everything with,
+// all through libdesktop's draw_context: crisp polygons, gradients, glows,
+// outlines and blocks.
 #pragma once
 
 #include <cstdint>
 #include <filesystem>
-#include <memory>
-#include <string>
+#include <span>
 #include <vector>
 
+#include <libdesktop/render.h>
+
 #include "Common.h"
-#include <libdesktop/platform.h>
 
-namespace zp {
+namespace zp
+{
 
-struct Vtx {
-    Vec3 p;
-    Vec3 n;
-    Vec3 c;
-    float glow = 0;
-};
+	// An Amiga's palette registers held four bits a channel. Solid colours are
+	// snapped to that grid, which is most of what gives the screen its era.
+	Vec4 Ocs(float r, float g, float b, float a = 1.0f);
+	Vec4 Ocs(Vec3 c, float a = 1.0f);
+	// 0xRRGGBB, snapped the same way.
+	Vec4 Hex(uint32_t rgb, float a = 1.0f);
+	Vec4 Mix(Vec4 a, Vec4 b, float t);
+	Vec4 Scale(Vec4 c, float k); // brightness, alpha kept
+	Vec4 WithAlpha(Vec4 c, float a);
+	// Effects are authored brighter than white; this rolls them into range, the
+	// hottest going white rather than clipping one channel at a time.
+	Vec4 Hot(Vec3 hdr, float a = 1.0f);
 
-struct RendererMesh;
+	// What fills a shape. Its points are in the space the shape is given in -
+	// world units for the world calls, pixels for the Screen ones - and the
+	// camera carries them with the shape.
+	struct Fill
+	{
+		enum Kind : uint8_t
+		{
+			SOLID,
+			LINEAR,
+			RADIAL
+		};
+		Kind kind = SOLID;
+		Vec4 a, b;
+		Vec2 from, to;
+		float radius = 0;
 
-struct GpuMesh {
-    std::shared_ptr<RendererMesh> backend;
-    uint32_t count = 0;
-    // Material vocabulary, fixed when the mesh is built: made things get a
-    // highlight, natural things get shader-side rock grain, never both.
-    float gloss = 0;
-    float grain = 0;
-    bool valid() const { return count > 0 && backend != nullptr; }
-};
+		static Fill Solid(Vec4 c);
+		static Fill Linear(Vec2 from, Vec4 a, Vec2 to, Vec4 b);
+		static Fill Radial(Vec2 centre, float radius, Vec4 inner, Vec4 outer);
+	};
 
-// A lamp in the world. There are no fixtures in the cavern, so every one of
-// these is the ship, an objective or something that has just gone off.
-struct Light {
-    Vec3 pos;
-    float radius = 0;
-    Vec3 colour;  // HDR, intensity already folded in
-};
-constexpr int kMaxLights = 8;
+	class Renderer
+	{
+	public:
+		// Half the view's height per unit of distance between the camera and the
+		// play plane: a 50 degree lens.
+		static constexpr float kViewSlope = 0.4642f;
 
-struct PostFx {
-    float time = 0;
-    float aberration = 1.0f;
-    float vignette = 1.0f;
-    float grain = 1.0f;
-    float bloomThreshold = 0.75f;
-    float bloomIntensity = 1.0f;
-    float exposure = 1.0f;
-    Vec3 bloomWeights = {0.75f, 0.55f, 0.40f};
-    Vec4 shock[4] = {};
-    Vec4 flash = {};
-};
+		void Begin(render::draw_context& dc, core::recti bounds);
+		void End();
 
-class RendererD3D;
+		float Width() const { return (float)bounds_.width(); }
+		float Height() const { return (float)bounds_.height(); }
 
-class Renderer {
-public:
-    Renderer();
-    ~Renderer();
-    Renderer(Renderer&&) noexcept;
-    Renderer& operator=(Renderer&&) noexcept;
-    Renderer(const Renderer&) = delete;
-    Renderer& operator=(const Renderer&) = delete;
+		// The camera stands `distance` in front of the plane, centred on `centre`.
+		// Distance only zooms the plane; it also sets how much slower things
+		// behind the plane slide by.
+		void SetCamera(Vec2 centre, float distance);
+		Vec2 CameraCentre() const { return cam_; }
+		float Scale() const { return scale_; } // pixels per world unit on the plane
+		Vec2 ToScreen(Vec2 world) const
+		{
+			return {half_.x + (world.x - cam_.x) * scale_, half_.y - (world.y - cam_.y) * scale_};
+		}
+		// A point `depth` units behind the plane (in front of it if negative), in
+		// perspective. Depths stay well inside the camera's distance.
+		Vec2 ToScreen(Vec2 world, float depth) const;
+		float ScaleAt(float depth) const { return scale_ * dist_ / (dist_ + depth); }
+		Vec2 ToWorld(Vec2 screen) const
+		{
+			return {cam_.x + (screen.x - half_.x) / scale_, cam_.y - (screen.y - half_.y) / scale_};
+		}
+		// The plane's visible box, grown by margin world units.
+		void ViewBox(float margin, Vec2* lo, Vec2* hi) const;
+		bool Visible(Vec2 lo, Vec2 hi, float margin = 0.0f) const;
 
-    bool Init(const platform::window_ptr& frame, int w, int h);
-    const std::string& Error() const { return error_; }
-    void Shutdown();
-    void Resize(int w, int h);
+		// World space: points in world units, y up. Borders are in pixels, so an
+		// outline stays one crisp pixel at every zoom.
+		void Poly(std::span<const Vec2> pts, const Fill& fill, Vec4 border = {}, float borderPx = 0,
+		          bool smooth = false);
+		// A soft disc that fades to nothing at its rim.
+		void Glow(Vec2 centre, float radius, Vec4 colour);
+		void Ring(Vec2 centre, float radius, float widthPx, Vec4 colour, int segments = 28);
+		void Line(Vec2 a, Vec2 b, float widthPx, Vec4 colour);
+		void Block(Vec2 centre, float sizePx, Vec4 colour);
+		// An axis aligned box, covering exactly the pixels a crisp polygon of the
+		// same corners would, at a fifth of the cost.
+		void Box(Vec2 lo, Vec2 hi, Vec4 colour);
 
-    int Width() const { return width_; }
-    int Height() const { return height_; }
-    float Aspect() const { return (float)width_ / (float)std::max(1, height_); }
+		// Screen space: pixels from the canvas's top left, y down.
+		void Rect(float x, float y, float w, float h, Vec4 colour);
+		void ScreenPoly(std::span<const Vec2> pts, const Fill& fill, Vec4 border = {}, float borderPx = 0,
+		                bool smooth = false);
+		void ScreenLine(Vec2 a, Vec2 b, float width, Vec4 colour);
+		void Clip(float x, float y, float w, float h);
+		void Unclip();
 
-    GpuMesh CreateMesh(const std::vector<Vtx>& verts, float gloss = 0.0f, float grain = 0.0f);
+	private:
+		render::paint ToPaint(const Fill& f, bool world) const;
+		core::pointd Out(Vec2 screen) const
+		{
+			return {bounds_.left + (double)screen.x, bounds_.top + (double)screen.y};
+		}
+		void Emit(const std::vector<core::pointd>& pts, const Fill& fill, bool world, Vec4 border, float borderPx,
+		          bool smooth);
 
-    // Lights are frame constants, so they must be submitted before BeginScene,
-    // which consumes and clears the set. Beyond kMaxLights the brightest win.
-    void AddLight(Vec3 pos, float radius, Vec3 colour);
+		render::draw_context* dc_ = nullptr;
+		core::recti bounds_;
+		Vec2 half_;
+		Vec2 cam_;
+		float dist_ = 50.0f;
+		float scale_ = 1.0f;
+		std::vector<core::pointd> pts_;
+	};
 
-    void BeginScene(const Mat4& viewProj, Vec3 camPos, Vec3 camRight, Vec3 camUp, float time,
-                    Vec3 shipPos, float torchRadius, float darkness, float meltdown, float warp,
-                    float fogDensity, Vec4 plasma, Vec3 clearColor);
-    // warpResponse opts the mesh into the meltdown shear; props stay rigid.
-    void DrawMesh(const GpuMesh& m, const Mat4& world, Vec4 tint, Vec4 emissive,
-                  float warpResponse = 0.0f);
+	// A screenshot, encoded and published whole: a failed capture can never leave
+	// a stale or half written file behind.
+	bool SavePng(const core::surface& picture, const std::filesystem::path& path);
 
-    void AddLine(Vec3 a, Vec3 b, float halfWidth, Vec4 color);
-    // Soft edged alpha blended slab, drawn under the additive batches.
-    void AddPanel(Vec2 topLeft, Vec2 size, Vec4 color);
-    void AddGlow(Vec3 p, float size, Vec4 color, int type = 0, float rot = 0, float stretch = 0,
-                 float phase = 0);
-    void AddShard(Vec3 p, float size, Vec4 quat, Vec4 color);
-
-    void FlushEffects();
-    void BeginHud();  // flush world effects, switch to a pixel-space camera
-    void EndScene(const PostFx& fx);
-    void Present(bool vsync);
-    bool SaveScreenshot(const std::filesystem::path& path);  // call before Present
-
-private:
-    std::unique_ptr<RendererD3D> backend_;
-    std::string error_;
-    int width_ = 0;
-    int height_ = 0;
-};
-
-}  // namespace zp
+} // namespace zp

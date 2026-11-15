@@ -1,50 +1,57 @@
 # AGENTS.md — working on zpilot
 
 Read [docs/design.md](docs/design.md) first. It records the player's mental model
-and nine invariants. **Most bad changes to this project are not bugs — they are
-violations of that document.** If a change conflicts with it, the change is
-wrong unless the human explicitly says the model has moved.
+and the invariants that keep it intact. **Most bad changes to this project are
+not bugs — they are violations of that document.** If a change conflicts with
+it, the change is wrong unless the human explicitly says the model has moved.
+[README.md](README.md) covers the game, its controls and its save file.
 
 ---
 
 ## Build and verify
 
 ```powershell
-.\dd.ps1 build                  # configure + build both configs
-.\dd.ps1 launch                 # build Release, then start the game
-.\dd.ps1 test --label zpilot   # build both, run the scripted capture, verify the frames
+.\dd.ps1 build debug            # or release; `build` alone builds both
+.\dd.ps1 test --label headless  # the no-visible-UI gate (zpilot remains an alias)
 .\dd.ps1 clean --dry-run
 ```
 
-`.\dd.ps1 build debug` or `release` builds one configuration. dd sets up the
-MSVC environment itself; do not try to source `vcvars` by hand.
+dd sets up the MSVC environment itself; do not try to source `vcvars` by hand.
+Build output lands in `build/release` and `build/debug`; checked captures go
+under each tree's `captures/run-*/shots`, without deleting earlier runs.
 
-The repository carries an unmodified [dd](https://github.com/ZacWalk/dd)
-checkout as `dd.ps1` plus `.dd/`; [docs/dd-upstream.json](docs/dd-upstream.json)
-records the vendored hashes. Keep zpilot's dd configuration in `dd.psd1`, keep
-application-owned dependency pins in `CMakeLists.txt`, and use
-`.\dd.ps1 commands --json` when you need the project-command list. dd's own
-documentation covers its [CLI/MCP modes](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
+`dd.ps1` and `.dd/` are the [dd](https://github.com/ZacWalk/dd) driver, vendored
+unmodified with its hashes in [docs/dd-upstream.json](docs/dd-upstream.json);
+never edit them. Keep zpilot's dd configuration in `dd.psd1` and the libdesktop
+and libfiles pins in `CMakeLists.txt`. dd's own documentation covers its
+[CLI/MCP modes](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
 and [built-in commands](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands).
 
-**`.\dd.ps1 test --label zpilot` is the gate.** It runs `zpilot.exe -capture`,
-a deterministic 1700-frame fly-through defined by `kScript` and `kShots` in
-[src/Main.cpp](src/Main.cpp), then [tests/capture.ps1](tests/capture.ps1) checks
-every PNG is non-blank and was taken on the screen (`Mode`) its `kShots` entry
-names. The capture opens the game's window and takes about half a minute per
-configuration — two to four minutes on a CI runner, which has no GPU and renders
-in software, so the check allows ten before calling the run hung. Run it after
-every change.
+**`.\dd.ps1 test --label headless` is the gate; run it after every change.** It
+runs the unit checks — profiles, input and audio conversion, in
+[tests/smoke.cpp](tests/smoke.cpp) and [tests/input.cpp](tests/input.cpp) —
+and `zpilot.exe --capture-headless`, the full deterministic fly-through of 1,701 frames
+defined by `kScript`, `kTaps` and `kShots` in [src/Main.cpp](src/Main.cpp).
+[tests/capture.ps1](tests/capture.ps1) then checks every PNG is non-blank and
+was taken on the screen (`Mode`) its `kShots` entry names. The capture draws
+every frame in the shell's offscreen window — a real native window, shown so it
+paints but cloaked from the desktop and never activated — and each shot again on
+libdesktop's software renderer. It takes 10–20 seconds per configuration on a
+desktop; a runner without a GPU draws the window on a software adapter, which is
+slower, so the check allows ten minutes before calling the run hung. The capture
+prints what a window frame costs to draw, mean and peak, and what a shot costs.
+Passing cases and actual counts are printed to the console. After a build,
+`ctest --preset debug -L headless -V --no-tests=error` reruns without rebuilding
+(`release` for Release).
+`-capture` remains the explicitly visible interactive variant; do not use it
+for unattended verification.
 
-The capture is in three acts. The third one exists because it is the only way
-the results screen, `Grade`, `Profile::Submit` and the save file are ever
-executed: it relaunches a planet and holds the drive so the ship leaves without
-the orb, which ends the run. Do not delete it to save four seconds. The capture
-keeps that save file in `shots/`, started empty each run
-(`Profile::UseFolder`); the check fails if it is missing or if the player's
-`%APPDATA%\zpilot\profile.dat` or the legacy `%APPDATA%\z-pilot\profile.dat` changed.
-The unit test checks legacy-profile import, new-profile precedence and isolated
-saves. Loading never moves a profile; only a later save writes the new folder.
+The capture is in three acts. The third is the only way the results screen,
+`Grade`, `Profile::Submit` and the save file are ever executed: it relaunches a
+planet and holds the drive so the ship leaves without the orb, which ends the
+run. Do not delete it to save four seconds. The capture keeps that save file in
+its fresh run's `shots/` (`Profile::UseFolder`); the check fails if it
+is missing or if either of the player's profiles in `%APPDATA%` changed.
 
 Three traps:
 
@@ -56,27 +63,26 @@ Three traps:
   on the wrong screen with every frame still lit. That is what the `Mode` (and,
   after the second act's taps, the planet) on each shot catches: the capture
   exits with 100 plus the shot's index. The second act's star-map moves are
-  `kTaps`, queued key messages that go down and up inside one frame, so they also
-  cover `Window`'s latch for taps shorter than a frame; the fake window-event test
-  covers the same path from platform keyboard callbacks.
-- The capture is the gameplay coverage. A frame going blank, a
-  shot on the wrong screen or the run hanging is a real regression, not a flaky
-  test.
-
-Build output lands in `build/release` and `build/debug`, screenshots in the
-`shots` folder under each.
+  `kTaps`, real key messages that go down and up inside one frame, so they also
+  cover the shell's latch for taps shorter than a step; the input test covers
+  the same `ui::key_input` path directly.
+- The capture is the gameplay coverage. A frame going blank, a shot on the
+  wrong screen or the run hanging is a real regression, not a flaky test.
 
 ---
 
 ## What this project is
 
-A Windows / Direct3D 11 / C++20 game with **no assets of any kind**. Its
-`Application::main_loop` owns the game frame loop (`owns_loop()` is true), while
-libdesktop supplies platform lifecycle, `pump_events`, native window/input
-events, fullscreen/DPI and audio. Rock, ships,
-props, glyphs, music and sound effects are all generated in code from a seed.
-That is a hard constraint and the point of the exercise: when something looks
-flat or repetitive, write a better algorithm, do not add a file.
+A Windows / C++20 game, drawn in 2D in a 16-bit home computer's style, with
+**no assets of any kind**: when something looks flat or repetitive, write a
+better algorithm, do not add a file
+([design §10](docs/design.md#10-everything-is-generated)).
+`Application` is a libdesktop `ui::shell`: the shell owns the window, the fixed
+60 Hz step, the keys, fullscreen and the loop (bar the capture's, which steps
+frame by frame), and the game draws on its canvas through libdesktop's
+`render::draw_context` — Direct3D 11 in the window, the software renderer in
+screenshots. libdesktop also supplies audio, and
+libfiles the PNG encoder ([design §12](docs/design.md#12-platform-and-renderer-boundary)).
 
 ---
 
@@ -84,19 +90,21 @@ flat or repetitive, write a better algorithm, do not add a file.
 
 | File | Responsibility |
 |---|---|
-| `Common.h` | Vec2/3/4, Mat4, `Rng`, value noise and `fbm`. Header only. |
+| `Common.h` | Vec2/3/4, quaternions, `Rng`, value noise and `fbm`. Header only. |
 | `Field.*` | Procedural planet: signed field, archetypes, validation, blueprint. |
 | `Physics.*` | 2D rigid body solver. Knows about `Field`, knows nothing about the game. |
-| `Geometry.*` | Every mesh in the game, built from the primitives at the top of the file. |
-| `Renderer.*` / `Shaders.h` | HDR scene, additive effects, bloom, CRT composite. |
-| `Font.*` | Stroke font, screen space and world space. |
-| `Window.*` | libdesktop platform window events and game input state. |
+| `Geometry.*` | Everything visible, generated: the planet slice (rock, bore bands, facets, boundary, sky) built once per planet, and the made and natural figures, the ship and the orb. |
+| `Renderer.*` | The 2D camera and drawing primitives over `render::draw_context`; the twelve-bit palette; PNG screenshots. |
+| `Font.*` | Stroke font as bars and quads, screen space and world space; the chrome lettering. |
+| `Input.*` | The game's keys, bound over the shell's `ui::key_input`. |
 | `Synth.*` | Procedural audio rendered into libdesktop's audio stream. |
 | `Profile.*` | Save file in `%APPDATA%\zpilot\profile.dat` (the capture keeps its own in `shots/`). |
-| `Game.*` | Everything else: modes, flight, props, HUD, star map. |
+| `Game.*` | Everything else: modes, flight, props, HUD, star map. `Step` simulates; `Draw` only draws. |
+| `Main.cpp` | The `ui::shell` application, fullscreen and screenshots, and the deterministic capture. |
 
-Dependencies run one way: `Game` → everything, `Geometry` → `Field`,
-`Physics` → `Field`. Nothing calls back into `Game`.
+Dependencies run one way: `Main` → `Game` and `Input`; `Game` → everything;
+`Geometry` → `Field` and `Renderer`; `Physics` and `Profile` → `Field`; `Font` →
+`Renderer`. Nothing calls back into `Game`.
 
 ---
 
@@ -105,14 +113,15 @@ Dependencies run one way: `Game` → everything, `Geometry` → `Field`,
 ### `World::AddBody` can reallocate
 
 `bodies_` is a `std::vector`. **Never hold a `Body&` across a call that might add
-one** — including `LatchOrb`. Bodies are never erased, only marked dead, so a
-stored index stays valid; a reference does not.
+one** — including `LatchOrb`. Hold an index instead. Bodies are never erased, but
+`RemoveBody` marks one dead and frees its slot for the next `AddBody`, so drop an
+index when its body is removed: a stale one can name a newer body.
 
 ### Explosions must not recurse
 
-`Blast` marks tanks by setting `Prop::fuse`; it never calls `DestroyProp`.
-`UpdateProps` does the detonating. Break that and a chain reaction becomes
-unbounded recursion.
+Destroying a tank calls `Blast`, so `Blast` never destroys a tank: it sets the
+tank's `Prop::fuse`, and `UpdateProps` does the detonating. Break that and a
+chain reaction becomes unbounded recursion.
 
 ### `kGenVersion`
 
@@ -121,30 +130,41 @@ Saved scores refer to caverns built by a specific generator, and `Profile`
 discards the file when the version moves. `Profile`'s own `kFileVersion` is
 separate and tracks the *record layout*.
 
-### The two sheets must agree
+### The slice shares its crossings
 
-`BuildTerrain` (cut face) and `BuildCave` (bore) are built over the same grid and
-share the cavern isoline exactly, via `min(±At, AtBase)` as the ring field. They
-meet with no seam only because both read the same `Profile::surfaceZ`. Change one
-side's height function and they come apart.
+The rock, each of the bore's bands and the boundary are cut from the same grid by
+the same marching squares (`BuildTerrain`), and they meet with no seam only
+because a point where the field crosses a cell edge has one name and one
+position whichever cell or strip asks for it (`Grid`), and a saddle cell is
+split the same way for all of them. Compute a crossing any other way and
+slivers of background open along every wall.
 
-### The two constant buffers are memcpy'd, not reflected
+### The slice must stay convex
 
-`Renderer::FrameCBData` and `ObjectCB` are copied byte for byte into the
-cbuffers declared at the top of [src/Shaders.h](src/Shaders.h). Add a field to
-one and you must add it in the same position in the other, or every shader
-silently reads the wrong slot.
+`draw_polygon` cuts a concave outline into triangles every time it is drawn —
+around a hundred microseconds for forty points on Direct3D — and the slice is
+drawn every frame. So `TraceStrips` only ever emits convex pieces (cells joined
+along a row while the union stays convex, whole-cell runs as rectangles), and
+the boundary is drawn as border-only outlines, which are never triangulated.
+New terrain geometry must keep to the same rules or the frame time goes.
 
-Lights live in `FrameCBData`, so `Renderer::AddLight` has to be called *before*
-`BeginScene`, which consumes the set and clears it. `Game::GatherLights` is the
-only caller.
+### Big gradients are slow in software
 
-### Winding
+Shots are drawn on libdesktop's software renderer, where a gradient fill costs
+about 140 ns a pixel, a translucent fill about 40 and an opaque rectangle about
+one: a single full-screen radial is some 190 ms. Keep large areas opaque and
+flat — the nebulae are opaque bands for that reason — and cut gradients down to
+where they show, as the bore's lamp pools are cut to the lamp's reach.
 
-Back-face culling is on, clockwise-front. A triangle is visible when its
-geometric normal points toward the camera, i.e. **-Z**. For a counter-clockwise
-2D polygon that means emitting `(p0, p2, p1)`. Get it backwards and the geometry
-silently vanishes.
+### `Draw` must not change the game
+
+`Game::Draw` runs once per paint, not per step, and again for every screenshot.
+It reads the state the last step left and nothing else may depend on it: the
+lamps are gathered there because they are a drawing concern, and the camera
+shake is rolled in `Step` because it comes from `shakeRng_`. Anything that feeds
+the simulation or an `Rng` belongs in `Step`, or the capture stops being
+deterministic. `GatherLights` sorts the lamps brightest first; the facets take
+the first `kMaxLights` and the bore pools only the first `kBorePools`.
 
 ### Determinism
 
@@ -164,7 +184,18 @@ anything that depends on frame rate, in either path.
 - Player-facing strings are **upper case** — the stroke font has no lower case.
 - Tuning constants live at the top of their file with a one-line reason. Prefer
   changing a named constant to adding a special case.
-- No `printf` debugging left behind; there is no console.
+- No `printf` debugging left behind; the only console output is the capture's.
+- `.clang-format` is the layout: tabs, Allman braces, 120 columns.
+  `.\dd.ps1 fmt` applies it to `src` and `tests` (dd formats only `include`,
+  `src` and `tests`, which here is all of zpilot's C++), given clang-format on
+  PATH, the only place dd looks; Visual Studio installs one in
+  `VC\Tools\Llvm\x64\bin`. Hand-laid tables — the capture script, the
+  archetype and sound parameters, the song — keep their layout between
+  `// clang-format off` and `// clang-format on`.
+- Both targets build at `/W4` with no warnings in Debug and Release, and
+  `.clang-tidy` names the bug-finding and performance checks the code is kept
+  clean against; a deliberate exception is a
+  `// NOLINTNEXTLINE(check): reason` above its line.
 
 ---
 
@@ -173,8 +204,8 @@ anything that depends on frame rate, in either path.
 Before saying you are done:
 
 1. `.\dd.ps1 test --label zpilot` passes.
-2. Nothing you added is set but never read. This codebase has accumulated
-   dead fields more than once — check.
+2. Nothing you added is set but never read. Dead fields are this codebase's
+   recurring fault — check.
 3. Player-facing names are consistent. The factory is not sometimes a reactor;
    the orb is not sometimes a pod.
 4. If you touched anything visual, re-read the invariants in `docs/design.md`.

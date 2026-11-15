@@ -22,12 +22,12 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libdesktop
     GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
-    GIT_TAG        04109ee82a500db38d439fa281bbc3f43124adfe
+    GIT_TAG        d172a12c6e3df0831a641133b96d073559a99db5
 )
 FetchContent_MakeAvailable(libdesktop)
 
-# Screenshots use the shared PNG codec only; zpilot keeps its HDR scene and
-# post-processing backend, but does not carry a second PNG implementation.
+# Screenshots are encoded with the shared PNG codec; zpilot carries no PNG
+# implementation of its own.
 if(NOT DEFINED FETCHCONTENT_SOURCE_DIR_LIBFILES
    AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libfiles/CMakeLists.txt")
     set(FETCHCONTENT_SOURCE_DIR_LIBFILES "${CMAKE_CURRENT_SOURCE_DIR}/../libfiles"
@@ -43,18 +43,34 @@ set(LIBFILES_GIF OFF)
 set(LIBFILES_TIFF OFF)
 FetchContent_Declare(libfiles
     GIT_REPOSITORY https://github.com/ZacWalk/libfiles.git
-    GIT_TAG        27de9d9fb67d7be7fcf9ff8a9f87dad5a91ae3eb
+    GIT_TAG        75e5e1dd703f095e08da8a1293aa59c9e3c4f92b
     SYSTEM
     EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(libfiles)
 
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+set(ZPILOT_ICON "${CMAKE_CURRENT_BINARY_DIR}/generated/zpilot.ico")
+set(ZPILOT_ICON_RC "${CMAKE_CURRENT_BINARY_DIR}/generated/zpilot-icon.rc")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(TO_NATIVE_PATH "${ZPILOT_ICON}" ZPILOT_ICON_NATIVE)
+string(REPLACE "\\" "\\\\" ZPILOT_ICON_NATIVE "${ZPILOT_ICON_NATIVE}")
+file(GENERATE OUTPUT "${ZPILOT_ICON_RC}" CONTENT "1 ICON \"${ZPILOT_ICON_NATIVE}\"\n")
+add_custom_command(OUTPUT "${ZPILOT_ICON}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_icon.py"
+        --output "${ZPILOT_ICON}"
+    DEPENDS tools/generate_icon.py tools/iconlib.py
+    COMMENT "Generating zpilot's procedural desktop icon"
+    VERBATIM)
+set_source_files_properties("${ZPILOT_ICON}" PROPERTIES HEADER_FILE_ONLY TRUE)
+set_source_files_properties("${ZPILOT_ICON_RC}" PROPERTIES OBJECT_DEPENDS "${ZPILOT_ICON}")
+
 libdesktop_add_app(zpilot
     SOURCES
+        "${ZPILOT_ICON}" "${ZPILOT_ICON_RC}"
         src/Main.cpp
-        src/Window.cpp
+        src/Input.cpp
         src/Renderer.cpp
-        src/RendererD3D.cpp
         src/Geometry.cpp
         src/Field.cpp
         src/Font.cpp
@@ -63,10 +79,8 @@ libdesktop_add_app(zpilot
         src/Profile.cpp
         src/Game.cpp
         src/Common.h
-        src/Window.h
+        src/Input.h
         src/Renderer.h
-        src/RendererD3D.h
-        src/Shaders.h
         src/Geometry.h
         src/Field.h
         src/Font.h
@@ -79,28 +93,32 @@ libdesktop_add_app(zpilot
 )
 
 target_include_directories(zpilot PRIVATE src)
-target_link_libraries(zpilot PRIVATE d3d11 dxgi d3dcompiler ole32 libfiles::libfiles)
+target_link_libraries(zpilot PRIVATE libdesktop::ui libfiles::libfiles)
 
 if (MSVC)
-    target_compile_options(zpilot PRIVATE /W3 /MP /EHsc /fp:fast)
+    target_compile_options(zpilot PRIVATE /W4 /MP /EHsc /fp:fast)
     target_compile_definitions(zpilot PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(zpilot_tests tests/smoke.cpp tests/window.cpp src/Profile.cpp src/Window.cpp
+    add_test(NAME zpilot_icon COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_icon.py" --output "${ZPILOT_ICON}" --check)
+    set_tests_properties(zpilot_icon PROPERTIES TIMEOUT 30 LABELS "zpilot;headless")
+
+    add_executable(zpilot_tests tests/smoke.cpp tests/input.cpp src/Profile.cpp src/Input.cpp
         src/Synth.cpp)
     target_include_directories(zpilot_tests PRIVATE src)
-    target_link_libraries(zpilot_tests PRIVATE libdesktop::platform)
+    target_link_libraries(zpilot_tests PRIVATE libdesktop::ui)
     if(MSVC)
-        target_compile_options(zpilot_tests PRIVATE /W3 /EHsc)
+        target_compile_options(zpilot_tests PRIVATE /W4 /EHsc)
         target_compile_definitions(zpilot_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
     add_test(NAME zpilot_unit COMMAND zpilot_tests)
-    set_tests_properties(zpilot_unit PROPERTIES TIMEOUT 30 LABELS zpilot)
+    set_tests_properties(zpilot_unit PROPERTIES TIMEOUT 30 LABELS "zpilot;headless")
 
     add_test(NAME zpilot_capture
         COMMAND pwsh -NoProfile -File "${PROJECT_SOURCE_DIR}/tests/capture.ps1"
-            -Exe "$<TARGET_FILE:zpilot>" -WorkDir "${CMAKE_CURRENT_BINARY_DIR}")
-    set_tests_properties(zpilot_capture PROPERTIES TIMEOUT 660 LABELS zpilot)
+            -Exe "$<TARGET_FILE:zpilot>" -WorkDir "${CMAKE_CURRENT_BINARY_DIR}" -Headless)
+    set_tests_properties(zpilot_capture PROPERTIES TIMEOUT 660 LABELS "zpilot;headless")
 endif()

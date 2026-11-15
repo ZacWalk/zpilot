@@ -6,6 +6,11 @@
         'default-target' = 'app'
     }
     dependencies = @{ owner = 'application' }
+    requirements = @{
+        tools = @{
+            python = @{ minimum = '3.9.0' }
+        }
+    }
     build = @{
         'x64-windows' = @{
             debug = 'debug'

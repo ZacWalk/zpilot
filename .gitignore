@@ -3,3 +3,4 @@ build/
 *.suo
 .vs/
 /.dd/state/
+/tmp/
